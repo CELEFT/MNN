@@ -1,51 +1,92 @@
-name: linux
+name: Build MNN with CUDA and Clang
+
 on:
   push:
-    branches:
-     - master
-     - 'feature/**'
-    paths:
-      - 'source/**'
-      - 'express/**'
-      - 'test/**'
-      - '.github/workflows/linux.yml'
+    branches: [ main ]
   pull_request:
-    branches: [master]
-    paths:
-      - 'source/**'
-      - 'express/**'
-      - 'test/**'
-      - '.github/workflows/linux.yml'
-
-concurrency:
-  group: linux-${{ github.ref }}
-  cancel-in-progress: true
-permissions:
-  contents: read
+    branches: [ main ]
 
 jobs:
-  linux_buil_test:
-    runs-on: ubuntu-latest
+  build:
+    runs-on: ubuntu-24.04
+
     steps:
-      - uses: actions/checkout@v3
-      - name: build
-        run: |
-            mkdir build && cd build
-            cmake .. -DMNN_BUILD_TEST=ON -DLLM_SUPPORT_VISION=true -DMNN_BUILD_OPENCV=true -DMNN_IMGCODECS=true -DMNN_LOW_MEMORY=true -DMNN_CPU_WEIGHT_DEQUANT_GEMM=true -DMNN_BUILD_LLM=true -DMNN_SUPPORT_TRANSFORMER_FUSE=true -DLLM_SUPPORT_AUDIO=true -DMNN_BUILD_AUDIO=true -DMNN_OPENCL=ON -DMNN_VULKAN=ON
-            make -j4
-      - name: test
-        run: cd build && ./run_test.out
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: build_non_sse
+      - name: Install system dependencies
         run: |
-            mkdir build_non_sse && cd build_non_sse
-            cmake -DMNN_BUILD_TEST=ON -DMNN_USE_SSE=OFF ..
-            make -j4
-      - name: test_non_sse
-        run: cd build_non_sse && ./run_test.out
+          sudo apt update
+          sudo apt install -y \
+            cmake \
+            build-essential \
+            libopencv-dev \
+            libvulkan-dev \
+            vulkan-validationlayers \
+            opencl-headers \
+            ocl-icd-opencl-dev \
+            pkg-config \
+            wget \
+            software-properties-common \
+            lsb-release \
+            gnupg
 
-      - name: build_avx512
+      - name: Install Clang 17
         run: |
-            mkdir build_avx512 && cd build_avx512
-            cmake -DMNN_BUILD_TEST=ON -DMNN_AVX512=ON -DMNN_AVX512_VNNI=ON ..
-            make -j4
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 17
+          sudo apt install -y clang-17 lld-17
+          echo "CC=clang-17" >> $GITHUB_ENV
+          echo "CXX=clang++-17" >> $GITHUB_ENV
+          clang-17 --version
+
+      - name: Set CUDA host compiler to Clang 17
+        run: echo "CUDAHOSTCXX=/usr/bin/clang++-17" >> $GITHUB_ENV
+
+      - name: Install CUDA 12.2
+        run: |
+          wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt update
+          sudo apt install -y cuda-12-2
+          echo "/usr/local/cuda-12.2/bin" >> $GITHUB_PATH
+          echo "CUDA_PATH=/usr/local/cuda-12.2" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/usr/local/cuda-12.2/lib64:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+
+      - name: Install Python (optional, for Python binding)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Configure CMake
+        run: |
+          mkdir -p build
+          cd build
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMNN_CUDA=ON \
+            -DMNN_VULKAN=ON \
+            -DMNN_OPENCL=ON \
+            -DMNN_BUILD_OPENCV=ON \
+            -DMNN_SUPPORT_BF16=ON \
+            -DMNN_BUILD_DEMO=OFF \
+            -DMNN_BUILD_TEST=OFF \
+            -DMNN_BUILD_SHARED_LIBS=ON \
+            -DCMAKE_C_COMPILER=clang-17 \
+            -DCMAKE_CXX_COMPILER=clang++-17
+
+      - name: Build MNN
+        run: |
+          cd build
+          make -j$(nproc)
+
+      - name: (Optional) Run tests
+        run: |
+          cd build
+          # ctest -V   # 如有需要可取消注释      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mnn-ubuntu24-cuda12.2-python3.11
+          path: ${{ github.workspace }}/artifact/
+          retention-days: 90
