@@ -1,10 +1,11 @@
-name: Build MNN with CUDA and Clang
+name: Build MNN with CUDA and Clang (Ubuntu 24.04)
 
 on:
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:  # 允许手动触发
 
 jobs:
   build:
@@ -52,9 +53,9 @@ jobs:
           sudo apt install -y cuda-12-2
           echo "/usr/local/cuda-12.2/bin" >> $GITHUB_PATH
           echo "CUDA_PATH=/usr/local/cuda-12.2" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=/usr/local/cuda-12.2/lib64:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/usr/local/cuda-12.2/lib64:$LD_LIBRARY_PATH" >> $GITHUB_ENV
 
-      - name: Install Python (optional, for Python binding)
+      - name: Install Python (for Python binding, optional)
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -81,12 +82,20 @@ jobs:
           cd build
           make -j$(nproc)
 
-      - name: (Optional) Run tests
+      - name: Prepare artifacts
         run: |
-          cd build
-          # ctest -V   # 如有需要可取消注释      - name: Upload artifact
+          mkdir -p ${{ github.workspace }}/artifact
+          # 复制生成的动态库和头文件到 artifact 目录
+          cp build/libMNN.so* ${{ github.workspace }}/artifact/ 2>/dev/null || true
+          cp -r include ${{ github.workspace }}/artifact/ 2>/dev/null || true
+          # 如果有 Python 绑定库，也可一并复制
+          cp build/libMNN_Py* ${{ github.workspace }}/artifact/ 2>/dev/null || true
+          # 保存 CMake 配置和构建日志以供参考
+          cp build/CMakeCache.txt ${{ github.workspace }}/artifact/ 2>/dev/null || true
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: mnn-ubuntu24-cuda12.2-python3.11
+          name: mnn-ubuntu24-cuda12.2-clang17
           path: ${{ github.workspace }}/artifact/
           retention-days: 90
