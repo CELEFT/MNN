@@ -1,0 +1,81 @@
+name: Build MNN (CPU only) with Clang on Ubuntu 24.04
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            cmake \
+            build-essential \
+            libopencv-dev \
+            pkg-config \
+            wget \
+            software-properties-common \
+            lsb-release \
+            gnupg
+
+      - name: Install Clang 17
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 17
+          sudo apt install -y clang-17 lld-17
+          echo "CC=clang-17" >> $GITHUB_ENV
+          echo "CXX=clang++-17" >> $GITHUB_ENV
+          clang-17 --version
+
+      - name: Install Python (for Python binding, optional)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Configure CMake (CPU only)
+        run: |
+          mkdir -p build
+          cd build
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMNN_CUDA=OFF \
+            -DMNN_VULKAN=OFF \
+            -DMNN_OPENCL=OFF \
+            -DMNN_BUILD_OPENCV=ON \
+            -DMNN_SUPPORT_BF16=ON \
+            -DMNN_BUILD_DEMO=OFF \
+            -DMNN_BUILD_TEST=OFF \
+            -DMNN_BUILD_SHARED_LIBS=ON \
+            -DCMAKE_C_COMPILER=clang-17 \
+            -DCMAKE_CXX_COMPILER=clang++-17
+
+      - name: Build MNN
+        run: |
+          cd build
+          make -j$(nproc)
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p ${{ github.workspace }}/artifact
+          cp build/libMNN.so* ${{ github.workspace }}/artifact/ 2>/dev/null || true
+          cp -r include ${{ github.workspace }}/artifact/ 2>/dev/null || true
+          cp build/libMNN_Py* ${{ github.workspace }}/artifact/ 2>/dev/null || true
+          cp build/CMakeCache.txt ${{ github.workspace }}/artifact/ 2>/dev/null || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mnn-ubuntu24-clang17-cpu-only
+          path: ${{ github.workspace }}/artifact/
+          retention-days: 90
