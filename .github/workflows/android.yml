@@ -1,6 +1,6 @@
 # mnn.yml
 # GitHub Actions workflow to build MNN for Android API level 30 with OpenCL, Vulkan, FP16/32, and BF16 support
-# Build only for arm64-v8a
+# Build only for arm64-v8a, then package entire build directory as tar.xz
 
 name: Build MNN for Android API 30
 
@@ -23,7 +23,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build opencl-headers
+          sudo apt-get install -y cmake ninja-build opencl-headers xz-utils
 
       - name: Download Android NDK r29
         run: |
@@ -65,8 +65,12 @@ jobs:
           cd build-arm64-v8a
           ninja
 
-      - name: Upload shared library
+      - name: Package build directory
+        run: |
+          tar -cf - build-arm64-v8a | xz -9e -T0 -z > build-arm64-v8a.tar.xz
+
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MNN-android-api30-arm64-v8a
-          path: build-arm64-v8a/libMNN.so
+          name: MNN-android-api30-arm64-v8a-build
+          path: build-arm64-v8a.tar.xz
