@@ -1,44 +1,78 @@
-name: android
+# mnn.yml
+# GitHub Actions workflow to build MNN for Android API level 30 with OpenCL, Vulkan, FP16/32, and BF16 support
+
+name: Build MNN for Android API 30
+
 on:
   push:
-    branches:
-     - master
-     - 'feature/**'
-    paths:
-      - 'source/**'
-      - 'express/**'
-      - 'test/**'
-      - 'project/android/**'
-      - '.github/workflows/android.yml'
+    branches: [ main ]
   pull_request:
-    branches: [master]
-    paths:
-      - 'source/**'
-      - 'express/**'
-      - 'test/**'
-      - 'project/android/**'
-      - '.github/workflows/android.yml'
-
-concurrency:
-  group: android-${{ github.ref }}
-  cancel-in-progress: true
-permissions:
-  contents: read
+    branches: [ main ]
 
 jobs:
-  android_build:
+  build-android:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        abi: [arm64-v8a, armeabi-v7a]   # Build for both 64-bit and 32-bit ARM
     steps:
-      - uses: actions/checkout@v3
-      - name: build_android_64
+      - name: Checkout MNN source
+        uses: actions/checkout@v4
+        with:
+          repository: alibaba/MNN
+          path: MNN
+
+      - name: Install dependencies
         run: |
-            cd project/android
-            mkdir build_64
-            cd build_64
-            ../build_64.sh -DMNN_LOW_MEMORY=true -DMNN_CPU_WEIGHT_DEQUANT_GEMM=true -DMNN_BUILD_LLM=true -DMNN_SUPPORT_TRANSFORMER_FUSE=true -DLLM_SUPPORT_VISION=true -DMNN_BUILD_OPENCV=true -DMNN_IMGCODECS=true -DLLM_SUPPORT_AUDIO=true -DMNN_BUILD_AUDIO=true -DMNN_SUPPORT_BF16=ON
-      - name: build_android_32
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build opencl-headers
+
+      - name: Download Android NDK r29
         run: |
-            cd project/android
-            mkdir build_32
-            cd build_32
-            ../build_32.sh -DMNN_LOW_MEMORY=true -DMNN_CPU_WEIGHT_DEQUANT_GEMM=true -DMNN_BUILD_LLM=true -DMNN_SUPPORT_TRANSFORMER_FUSE=true -DLLM_SUPPORT_AUDIO=true -DMNN_BUILD_AUDIO=true -DLLM_SUPPORT_VISION=true -DMNN_BUILD_OPENCV=true -DMNN_IMGCODECS=true
+          wget -q https://googledownloads.cn/android/repository/android-ndk-r29-linux.zip
+          unzip -q android-ndk-r29-linux.zip
+          echo "ANDROID_NDK=$PWD/android-ndk-r29" >> $GITHUB_ENV
+
+      - name: Configure CMake for ${{ matrix.abi }}
+        run: |
+          mkdir -p build-${{ matrix.abi }}
+          cd build-${{ matrix.abi }}
+          # Set base CMake arguments
+          CMAKE_ARGS=(
+            -G Ninja
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake
+            -DANDROID_ABI=${{ matrix.abi }}
+            -DANDROID_PLATFORM=android-30
+            -DANDROID_STL=c++_shared
+            -DMNN_OPENCL=ON
+            -DMNN_VULKAN=ON
+            -DMNN_ARM82=ON                 # Enable FP16 for ARMv8.2 (arm64)
+            -DMNN_SUPPORT_BF16=ON           # Enable BF16 support
+            -DMNN_BUILD_SHARED_LIBS=ON
+            -DMNN_SEP_BUILD=ON
+            -DMNN_USE_SYSTEM_LIB=OFF        # Use dlopen for OpenCL/Vulkan
+            -DMNN_BUILD_TRAIN=OFF
+            -DMNN_BUILD_DEMO=OFF
+            -DMNN_BUILD_TOOLS=OFF
+            -DMNN_BUILD_CONVERTER=OFF
+            -DMNN_BUILD_TEST=OFF
+            -DMNN_BUILD_BENCHMARK=OFF
+            -DMNN_BUILD_QUANTOOLS=OFF
+          )
+          # For armeabi-v7a, enable FP16 support if the CPU supports it
+          if [ "${{ matrix.abi }}" = "armeabi-v7a" ]; then
+            CMAKE_ARGS+=(-DMNN_SUPPORT_FP16_ARMV7=ON)
+          fi
+          # Run cmake with all arguments
+          cmake "${CMAKE_ARGS[@]}" ../MNN
+
+      - name: Build MNN
+        run: |
+          cd build-${{ matrix.abi }}
+          ninja
+
+      - name: Upload shared library
+        uses: actions/upload-artifact@v4
+        with:
+          name: MNN-android-api30-${{ matrix.abi }}
+          path: build-${{ matrix.abi }}/libMNN.so
