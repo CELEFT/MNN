@@ -49,15 +49,6 @@ jobs:
             -DMNN_BUILD_SHARED_LIBS=ON
             -DMNN_SEP_BUILD=ON
             -DMNN_USE_SYSTEM_LIB=OFF        # Use dlopen for OpenCL/Vulkan
-            -DMNN_BUILD_TRAIN=OFF
-            -DMNN_BUILD_DEMO=OFF
-            -DMNN_BUILD_TOOLS=OFF
-            -DMNN_BUILD_CONVERTER=OFF
-            -DMNN_BUILD_TEST=OFF
-            -DMNN_BUILD_BENCHMARK=OFF
-            -DMNN_BUILD_QUANTOOLS=OFF
-          )
-          # Run cmake with all arguments
           cmake "${CMAKE_ARGS[@]}" ../MNN
 
       - name: Build MNN
