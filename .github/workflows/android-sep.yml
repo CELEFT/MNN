@@ -68,7 +68,7 @@ jobs:
 
       - name: Package install directory
         run: |
-          tar -cf - -C build-arm64-v8a/install . | xz -9e -T0 > MNN-android-arm64-v8a-install.tar.xz
+          tar -cf - -C build-arm64-v8a/install | xz -9e -T0 > MNN-android-arm64-v8a-install.tar.xz
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
