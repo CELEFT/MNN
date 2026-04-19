@@ -43,16 +43,16 @@ jobs:
             -DANDROID_ABI=arm64-v8a
             -DANDROID_PLATFORM=android-32
             -DANDROID_STL=c++_shared
-            -DCMAKE_BUILD_TYPE=MinSizeRel                # 体积优化编译
-            -DMNN_USE_OPENCV=ON                          # 启用 OpenCV
+            -DCMAKE_BUILD_TYPE=MinSizeRel
+            -DMNN_USE_OPENCV=ON
             -DMNN_OPENCL=ON
             -DMNN_VULKAN=ON
             -DMNN_ARM82=ON
             -DMNN_SUPPORT_BF16=ON
             -DMNN_BUILD_SHARED_LIBS=ON
             -DMNN_SEP_BUILD=ON
-            -DMNN_BUILD_MINI=OFF                          # 启用精简模式减小体积
-            -DCMAKE_INSTALL_PREFIX=$PWD/install          # 设置安装目录
+            -DMNN_BUILD_MINI=OFF
+            -DCMAKE_INSTALL_PREFIX=$PWD/install
           )
           cmake "${CMAKE_ARGS[@]}" ../MNN
 
@@ -61,17 +61,14 @@ jobs:
           cd build-arm64-v8a
           ninja
 
-      - name: Install to staging directory
+      - name: Install to staging directory (including headers)
         run: |
           cd build-arm64-v8a
           ninja install
 
-      - name: Package installed files (lib/ and include/)
+      - name: Package install directory
         run: |
-          mkdir -p artifact
-          cp -r build-arm64-v8a/install/lib artifact/
-          cp -r build-arm64-v8a/install/include artifact/
-          tar -cf - artifact | xz -9e -T0 > MNN-android-arm64-v8a-install.tar.xz
+          tar -cf - -C build-arm64-v8a/install . | xz -9e -T0 > MNN-android-arm64-v8a-install.tar.xz
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
