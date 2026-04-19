@@ -40,8 +40,8 @@ jobs:
 
       - name: Configure CMake for arm64-v8a (using Make)
         run: |
-          mkdir -p build-arm64-v8a
-          cd build-arm64-v8a
+          mkdir -p build-arm64-v8a-sep
+          cd build-arm64-v8a-sep
           cmake ../MNN \
             -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
             -DCMAKE_BUILD_TYPE=Release \
@@ -65,7 +65,7 @@ jobs:
 
       - name: Build MNN with Make
         run: |
-          cd build-arm64-v8a
+          cd build-arm64-v8a-sep
           make -j$(nproc)
 
       - name: Package entire build directory (with headers and libc++_shared.so)
@@ -76,10 +76,10 @@ jobs:
             mkdir -p build-arm64-v8a/lib
             cp "$LIBCXX" build-arm64-v8a/lib/
           fi
-          tar -cf - build-arm64-v8a | xz -9e -T2 > MNN-android-api32-arm64-v8a.tar.xz
+          tar -cf - build-arm64-v8a-sep | xz -9e -T2 > MNN-android-api32-arm64-v8a-sep.tar.xz
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MNN-android-api32-arm64-v8a
-          path: MNN-android-api32-arm64-v8a.tar.xz
+          name: MNN-android-api32-arm64-v8a-sep
+          path: MNN-android-api32-arm64-v8a-sep.tar.xz
