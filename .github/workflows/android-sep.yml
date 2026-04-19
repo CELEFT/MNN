@@ -1,0 +1,62 @@
+name: Build MNN for Android API 32
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout MNN source
+        uses: actions/checkout@v4
+        with:
+          repository: alibaba/MNN
+          path: MNN
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build opencl-headers xz-utils
+
+      - name: Download Android NDK r29
+        run: |
+          wget -q https://googledownloads.cn/android/repository/android-ndk-r29-linux.zip
+          unzip -q android-ndk-r29-linux.zip
+          echo "ANDROID_NDK=$PWD/android-ndk-r29" >> $GITHUB_ENV
+
+      - name: Configure CMake for arm64-v8a
+        run: |
+          mkdir -p build-arm64-v8a
+          cd build-arm64-v8a
+          CMAKE_ARGS=(
+            -G Ninja
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake
+            -DANDROID_ABI=arm64-v8a
+            -DANDROID_PLATFORM=android-32
+            -DANDROID_STL=c++_shared
+            -DMNN_OPENCL=ON
+            -DMNN_VULKAN=ON
+            -DMNN_ARM82=ON
+            -DMNN_SUPPORT_BF16=ON
+            -DMNN_BUILD_SHARED_LIBS=ON
+            -DMNN_SEP_BUILD=ON
+          )
+          cmake "${CMAKE_ARGS[@]}" ../MNN
+
+      - name: Build MNN
+        run: |
+          cd build-arm64-v8a
+          ninja
+
+      - name: Package build directory
+        run: |
+          tar -cf - build-arm64-v8a | xz -9e -T0 -z > build-sep-arm64-v8a.tar.xz
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MNN-android-api32-arm64-v8a-build-sep
+          path: build-sep-arm64-v8a.tar.xz
