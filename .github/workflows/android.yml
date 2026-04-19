@@ -59,7 +59,7 @@ jobs:
             -DMNN_SUPPORT_BF16=ON \
             -DANDROID_NATIVE_API_LEVEL=android-32 \
             -DMNN_BUILD_FOR_ANDROID_COMMAND=ON \
-            -DNATIVE_LIBRARY_OUTPUT=. \
+            -DNATIVE_LIBRARY_OUTPUT=./lib \
             -DNATIVE_INCLUDE_OUTPUT=. \
             -DCMAKE_INSTALL_PREFIX=$PWD/install
 
