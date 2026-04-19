@@ -73,8 +73,8 @@ jobs:
           cp -r MNN/include build-arm64-v8a/
           LIBCXX=$(find $ANDROID_NDK -name "libc++_shared.so" | grep "aarch64-linux-android" | head -n 1)
           if [ -n "$LIBCXX" ]; then
-            mkdir -p build-arm64-v8a/lib
-            cp "$LIBCXX" build-arm64-v8a/lib/
+            mkdir -p build-arm64-v8a-sep/lib
+            cp "$LIBCXX" build-arm64-v8a-sep/lib/
           fi
           tar -cf - build-arm64-v8a-sep | xz -9e -T2 > MNN-android-api32-arm64-v8a-sep.tar.xz
 
