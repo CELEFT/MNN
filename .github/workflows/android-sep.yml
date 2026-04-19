@@ -1,4 +1,4 @@
-name: Build MNN for Android API 32 (Make + OpenCV)
+name: Build MNN for Android API 32 (Make + OpenCV) SEP
 
 on:
   push:
@@ -38,7 +38,7 @@ jobs:
           unzip -q opencv-4.13.0-android-sdk.zip
           echo "OpenCV_DIR=$PWD/OpenCV-android-sdk/sdk/native/jni" >> $GITHUB_ENV
 
-      - name: Configure CMake for arm64-v8a (using Make)
+      - name: Configure CMake for arm64-v8a (SEP BUILD)
         run: |
           mkdir -p build-arm64-v8a-sep
           cd build-arm64-v8a-sep
@@ -70,12 +70,15 @@ jobs:
 
       - name: Package entire build directory (with headers and libc++_shared.so)
         run: |
-          cp -r MNN/include build-arm64-v8a/
+          # 复制头文件到构建目录
+          cp -r MNN/include build-arm64-v8a-sep/
+          # 复制 NDK C++ 标准库
           LIBCXX=$(find $ANDROID_NDK -name "libc++_shared.so" | grep "aarch64-linux-android" | head -n 1)
           if [ -n "$LIBCXX" ]; then
             mkdir -p build-arm64-v8a-sep/lib
             cp "$LIBCXX" build-arm64-v8a-sep/lib/
           fi
+          # 打包
           tar -cf - build-arm64-v8a-sep | xz -9e -T2 > MNN-android-api32-arm64-v8a-sep.tar.xz
 
       - name: Upload artifact
