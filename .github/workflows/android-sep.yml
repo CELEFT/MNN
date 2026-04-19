@@ -1,4 +1,4 @@
-name: Build MNN for Android API 32 (Reduced Size)
+name: Build MNN for Android API 32
 
 on:
   push:
@@ -10,76 +10,71 @@ jobs:
   build-android:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout MNN Source
+      - name: Checkout MNN source
         uses: actions/checkout@v4
         with:
           repository: alibaba/MNN
           path: MNN
 
-      - name: Cache Dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            android-ndk-r29
-            OpenCV-android-sdk
-          key: ${{ runner.os }}-mnn-android-ndk29-opencv4.13.0
-
-      - name: Install Dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build wget unzip
+          sudo apt-get install -y cmake ninja-build opencl-headers xz-utils wget unzip
 
       - name: Download Android NDK r29
         run: |
-          if [ ! -d android-ndk-r29 ]; then
-            wget -q https://dl.google.com/android/repository/android-ndk-r29-linux.zip
-            echo "4abbbcdc842f3d4879206e9695d52709603e52dd68d3c1fff04b3b5e7a308ecf android-ndk-r29-linux.zip" | sha256sum -c
-            unzip -q android-ndk-r29-linux.zip
-          fi
+          wget -q https://googledownloads.cn/android/repository/android-ndk-r29-linux.zip
+          unzip -q android-ndk-r29-linux.zip
           echo "ANDROID_NDK=$PWD/android-ndk-r29" >> $GITHUB_ENV
 
       - name: Download and Setup OpenCV 4.13.0
         run: |
-          if [ ! -d OpenCV-android-sdk ]; then
-            wget -q https://github.com/opencv/opencv/releases/download/4.13.0/opencv-4.13.0-android-sdk.zip
-            unzip -q opencv-4.13.0-android-sdk.zip
-          fi
+          wget -q https://github.com/opencv/opencv/releases/download/4.13.0/opencv-4.13.0-android-sdk.zip
+          unzip -q opencv-4.13.0-android-sdk.zip
           echo "OpenCV_DIR=$PWD/OpenCV-android-sdk/sdk/native/jni" >> $GITHUB_ENV
 
-      - name: Configure CMake (Reduced Size)
+      - name: Configure CMake for arm64-v8a (Optimized Size + OpenCV + Multi-thread)
         run: |
           mkdir -p build-arm64-v8a
           cd build-arm64-v8a
-          cmake ../MNN \
-            -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
-            -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-32 \
-            -DANDROID_STL=c++_shared \
-            -DMNN_USE_OPENCV=ON \
-            -DMNN_BUILD_MINI=ON \
-            -DMNN_DEBUG=OFF \
-            -DMNN_BUILD_TOOLS=OFF \
-            -DMNN_BUILD_DEMO=OFF \
-            -DMNN_FORBID_MULTI_THREAD=ON \
-            -DMNN_USE_THREAD_POOL=OFF \
-            -DCMAKE_CXX_FLAGS="-s -Os --gc-sections"
+          CMAKE_ARGS=(
+            -G Ninja
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake
+            -DANDROID_ABI=arm64-v8a
+            -DANDROID_PLATFORM=android-32
+            -DANDROID_STL=c++_shared
+            -DCMAKE_BUILD_TYPE=MinSizeRel                # 体积优化编译
+            -DMNN_USE_OPENCV=ON                          # 启用 OpenCV
+            -DMNN_OPENCL=ON
+            -DMNN_VULKAN=ON
+            -DMNN_ARM82=ON
+            -DMNN_SUPPORT_BF16=ON
+            -DMNN_BUILD_SHARED_LIBS=ON
+            -DMNN_SEP_BUILD=ON
+            -DMNN_BUILD_MINI=OFF                          # 启用精简模式减小体积
+            -DCMAKE_INSTALL_PREFIX=$PWD/install          # 设置安装目录
+          )
+          cmake "${CMAKE_ARGS[@]}" ../MNN
 
       - name: Build MNN
         run: |
           cd build-arm64-v8a
           ninja
 
-      - name: Package Library Only
+      - name: Install to staging directory
         run: |
-          mkdir -p output/lib
-          cp build-arm64-v8a/*.so output/lib/
-          cp -r MNN/include output/
-          tar -cf - output | xz -9e -T0 > MNN-android-arm64-v8a.tar.xz
+          cd build-arm64-v8a
+          ninja install
 
-      - name: Upload Artifact
+      - name: Package installed files (lib/ and include/)
+        run: |
+          mkdir -p artifact
+          cp -r build-arm64-v8a/install/lib artifact/
+          cp -r build-arm64-v8a/install/include artifact/
+          tar -cf - artifact | xz -9e -T0 > MNN-android-arm64-v8a-install.tar.xz
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MNN-android-api32-arm64-v8a
-          path: MNN-android-arm64-v8a.tar.xz
+          name: MNN-android-arm64-v8a-install
+          path: MNN-android-arm64-v8a-install.tar.xz
