@@ -16,10 +16,15 @@ jobs:
           repository: alibaba/MNN
           path: MNN
 
-      - name: Install dependencies
+      - name: Install dependencies (downgrade CMake)
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build opencl-headers xz-utils wget unzip
+          sudo apt-get remove -y cmake
+          wget -q https://github.com/Kitware/CMake/releases/download/v3.22.1/cmake-3.22.1-linux-x86_64.tar.gz
+          tar -xzf cmake-3.22.1-linux-x86_64.tar.gz
+          sudo cp -r cmake-3.22.1-linux-x86_64/bin/* /usr/local/bin/
+          sudo cp -r cmake-3.22.1-linux-x86_64/share/* /usr/local/share/
+          sudo apt-get install -y ninja-build opencl-headers xz-utils wget unzip
 
       - name: Download Android NDK r29
         run: |
@@ -33,33 +38,26 @@ jobs:
           unzip -q opencv-4.13.0-android-sdk.zip
           echo "OpenCV_DIR=$PWD/OpenCV-android-sdk/sdk/native/jni" >> $GITHUB_ENV
 
-      - name: Fix MNN OpenCV CMake issue (remove PRE_BUILD)
-        run: |
-          sed -i '/PRE_BUILD/d' MNN/tools/cv/CMakeLists.txt
-
       - name: Configure CMake for arm64-v8a
         run: |
           mkdir -p build-arm64-v8a
           cd build-arm64-v8a
-          CMAKE_ARGS=(
-            -G Ninja
-            -DCMAKE_POLICY_DEFAULT_CMP0175=OLD      # 可选，保留以防其他模块出现类似问题
-            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake
-            -DANDROID_ABI=arm64-v8a
-            -DANDROID_PLATFORM=android-32
-            -DANDROID_STL=c++_shared
-            -DCMAKE_BUILD_TYPE=Release
-            -DMNN_BUILD_OPENCV=ON
-            -DMNN_OPENCL=ON
-            -DMNN_VULKAN=ON
-            -DMNN_ARM82=ON
-            -DMNN_SUPPORT_BF16=ON
-            -DMNN_BUILD_SHARED_LIBS=ON
-            -DMNN_SEP_BUILD=OFF
-            -DMNN_BUILD_MINI=OFF
+          cmake ../MNN \
+            -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-32 \
+            -DANDROID_STL=c++_shared \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMNN_BUILD_OPENCV=ON \
+            -DMNN_OPENCL=ON \
+            -DMNN_VULKAN=ON \
+            -DMNN_ARM82=ON \
+            -DMNN_SUPPORT_BF16=ON \
+            -DMNN_BUILD_SHARED_LIBS=ON \
+            -DMNN_SEP_BUILD=OFF \
+            -DMNN_BUILD_MINI=OFF \
             -DCMAKE_INSTALL_PREFIX=$PWD/install
-          )
-          cmake "${CMAKE_ARGS[@]}" ../MNN
 
       - name: Build MNN
         run: |
