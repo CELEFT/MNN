@@ -57,6 +57,33 @@ static inline VARP _var(std::vector<T> vec, const std::vector<int> &dims) {
     return _Const(vec.data(), dims, NHWC, halide_type_of<T>());
 }
 
+// Redefine MNN_PRINT/MNN_ERROR for Llm member methods to capture log into mContext->log_buffer.
+// All code below this point that uses MNN_PRINT/MNN_ERROR must be Llm class member methods.
+#ifdef LLM_LOG_TO_STRING
+static inline void _llmOrigPrint(const char* msg) {
+    MNN_PRINT("%s", msg);
+}
+static inline void _llmOrigError(const char* msg) {
+    MNN_ERROR("%s", msg);
+}
+#undef MNN_PRINT
+#undef MNN_ERROR
+#define MNN_PRINT(format, ...)                                       \
+    do {                                                             \
+        char _log_buf[4096];                                         \
+        snprintf(_log_buf, sizeof(_log_buf), format, ##__VA_ARGS__); \
+        _llmOrigPrint(_log_buf);                                     \
+        mContext->log_buffer += _log_buf;                            \
+    } while (0)
+#define MNN_ERROR(format, ...)                                       \
+    do {                                                             \
+        char _log_buf[4096];                                         \
+        snprintf(_log_buf, sizeof(_log_buf), format, ##__VA_ARGS__); \
+        _llmOrigError(_log_buf);                                     \
+        mContext->log_buffer += _log_buf;                            \
+    } while (0)
+#endif // LLM_LOG_TO_STRING
+
 Llm* Llm::createLLM(const std::string& config_path) {
     std::shared_ptr<LlmConfig> config(new LlmConfig(config_path));
     Llm* llm = nullptr;
@@ -69,6 +96,11 @@ Llm* Llm::createLLM(const std::string& config_path) {
 }
 void Llm::destroy(Llm* llm) {
     delete llm;
+}
+
+std::string Llm::getLog() {
+    std::string log = std::move(mContext->log_buffer);
+    return log;
 }
 
 std::string Llm::dump_config() {
@@ -84,6 +116,9 @@ void Llm::setChatTemplate() {
             context = jinja["context"].dump();
         }
         mTokenizer->set_chat_template(jinja["chat_template"].get<std::string>(), jinja.value("eos", ""), context);
+    }
+    if (jinja.contains("context")) {
+        mTokenizer->set_chat_template_context(jinja["context"].dump());
     }
 }
 
@@ -120,7 +155,7 @@ void Llm::setDebugCallback(MNN::TensorCallBackWithInfo&& before, MNN::TensorCall
     mExecutor->setCallBack(std::move(before), std::move(after));
 }
 
-void Llm::setRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg) {
+void Llm::setRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg, bool mllm) {
     rtg->setHint(MNN::Interpreter::INIT_THREAD_NUMBER, 4);
 
     rtg->setHint(MNN::Interpreter::MEM_ALLOCATOR_TYPE, 0);
@@ -151,7 +186,7 @@ void Llm::setRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg
     rtg->setHint(MNN::Interpreter::DYNAMIC_QUANT_OPTIONS, mConfig->config_.value("dynamic_option", 0));
 
     rtg->setHintPtr(Interpreter::KVCACHE_INFO, mMeta.get());
-    if (backend_type_convert(mConfig->backend_type()) != 0) { // not cpu
+    if (backend_type_convert(mConfig->backend_type(mllm)) != 0) { // not cpu
         std::string cacheFilePath = tmpPath.length() != 0 ? tmpPath : ".";
         rtg->setCache(cacheFilePath + "/mnn_cachefile.bin");
     }
@@ -233,7 +268,7 @@ void Llm::setSpeculativeConfig() {
     }
 }
 
-static bool checkFile(const std::string& path, const char* name) {
+bool Llm::checkFile(const std::string& path, const char* name) {
     if (!MNNFileExist(path.c_str())) {
         MNN_ERROR("[Error]: %s not found: %s\n", name, path.c_str());
         return false;
@@ -823,6 +858,10 @@ void Llm::generate(int max_token) {
     if (is_stop(mContext->current_token)) {
         return;
     }
+    // Enable record queue during decode for better performance
+    if (mConfig->backend_type() == "opencl") {
+        mRuntimeManager->setHint(MNN::Interpreter::OP_ENCODER_NUMBER_FOR_COMMIT, 512);
+    }
     mGenerateParam->max_new_tokens = max_token;
     mGenerationStrategy->generate(*mGenerateParam);
 }
@@ -937,6 +976,10 @@ std::vector<int> Llm::generate(MNN::Express::VARP input_embeds, int max_tokens) 
     int seqLen = input_embeds->getInfo()->dim[mSeqLenIndex];
     mContext->prompt_len = seqLen;
 
+    // Disable record queue during prefill for better performance
+    if (mConfig->backend_type() == "opencl") {
+        mRuntimeManager->setHint(MNN::Interpreter::OP_ENCODER_NUMBER_FOR_COMMIT, 0);
+    }
     Timer _t;
     auto outputs = forwardVec(input_embeds);
     if(mGenerateParam->outputs.size() < 1) {
@@ -946,6 +989,20 @@ std::vector<int> Llm::generate(MNN::Express::VARP input_embeds, int max_tokens) 
     updateContext(seqLen, 0);
     mContext->prefill_us += _t.durationInUs();
     MNN::Express::ExecutorScope::Current()->gc(); // after prefill
+
+    // Clear file_flag after prefill, before the decode loop. Otherwise each
+    // L=1 decode step re-enters op-level PendingWrite and overwrites the
+    // on-disk prefix with post-decode state.
+    //
+    // The max_tokens > 0 gate distinguishes the two call paths:
+    //   non-chunked (max_tokens > 0, prefill+decode in one call): clear here
+    //   chunked (max_tokens == 0 per chunk): don't clear — chunks 2..N must
+    //   keep writing; completePrefixWrite() in the caller clears after the loop.
+    if (mPrefixCacheMode && mCallIndex == 1 && mMeta->file_flag == KVMeta::PendingWrite && max_tokens > 0) {
+        mMeta->file_name = "";
+        mMeta->file_flag = KVMeta::NoChange;
+        mMeta->layer_index = 0;
+    }
 
     // prefix cache mode and response second time
     if(mPrefixCacheMode && mCallIndex == 2) {
@@ -989,6 +1046,10 @@ std::vector<int> Llm::generate(MNN::Express::VARP input_embeds, int max_tokens) 
     }
     // call generation function
     if (0 < max_tokens) {
+        // Enable record queue during decode for better performance
+        if (mConfig->backend_type() == "opencl") {
+            mRuntimeManager->setHint(MNN::Interpreter::OP_ENCODER_NUMBER_FOR_COMMIT, 512);
+        }
         mGenerateParam->max_new_tokens = max_tokens;
         mGenerationStrategy->generate(*mGenerateParam);
     }
@@ -1199,6 +1260,16 @@ std::vector<Express::VARP> Llm::getOutputs() const {
 }
 
 bool Llm::setPrefixCacheFile(const std::string& filename, int flag) {
+    // Prefix cache requires kvcache_mmap. Without it mKVCacheDir is unset and
+    // the disk-backed alloc in CPUKVCacheManager::onAlloc crashes with a
+    // nullptr mmap. Reject up-front instead of crashing deep in the backend.
+    if (!mConfig->kvcache_mmap()) {
+        MNN_ERROR(
+            "setPrefixCacheFile requires kvcache_mmap=true in config. "
+            "Prefix cache is a disk-backed feature; please enable kvcache_mmap.\n");
+        return false;
+    }
+
     mPrefixCacheFileName = filename;
     mCallIndex = 0;
     mPrefixCacheMode = true;
@@ -1218,6 +1289,78 @@ bool Llm::setPrefixCacheFile(const std::string& filename, int flag) {
             break;
         }
     }
+
+    // Further check: the real .k/.v data files must exist, be non-empty, and have consistent
+    // sizes across layers. This guards against cases where _sync markers remain but the
+    // actual data files were deleted / truncated / partially written, which would otherwise
+    // lead to a crash in CPUKVCacheManager::onAlloc (e.g. memset on a null mmap address).
+    if (mIsPrefixFileExist) {
+        // Only "mix" (LA + regular attention) has intrinsically non-uniform
+        // per-layer KV sizes. Everything else (full / sliding / unset → "full")
+        // stays under the cross-layer uniformity check that catches partial or
+        // corrupted writes.
+        const bool isHybrid = (mConfig->attention_type() == "mix");
+        size_t refKeySize = 0;
+        size_t refValueSize = 0;
+        for (int i = 0; i < mConfig->layer_nums(); i++) {
+            auto base = MNNFilePathConcat(mConfig->prefix_cache_path(), mPrefixCacheFileName) + "_" + std::to_string(i);
+            auto k_data = base + ".k";
+            auto v_data = base + ".v";
+            if (!MNNFileExist(k_data.c_str()) || !MNNFileExist(v_data.c_str())) {
+                MNN_PRINT("Prefix cache data file missing: %s or %s\n", k_data.c_str(), v_data.c_str());
+                mIsPrefixFileExist = false;
+                break;
+            }
+            auto kfd = MNNOpenFile(k_data.c_str(), MNN_FILE_READ);
+            auto vfd = MNNOpenFile(v_data.c_str(), MNN_FILE_READ);
+            size_t kSize = (kfd == INVALID_FILE) ? INVALID_SIZE : MNNGetFileSize(kfd);
+            size_t vSize = (vfd == INVALID_FILE) ? INVALID_SIZE : MNNGetFileSize(vfd);
+            if (kfd != INVALID_FILE)
+                MNNCloseFile(kfd);
+            if (vfd != INVALID_FILE)
+                MNNCloseFile(vfd);
+            if (kSize == INVALID_SIZE || kSize == 0 || vSize == INVALID_SIZE || vSize == 0) {
+                MNN_PRINT("Prefix cache data file has invalid size: %s(%zu) %s(%zu)\n", k_data.c_str(), kSize,
+                          v_data.c_str(), vSize);
+                mIsPrefixFileExist = false;
+                break;
+            }
+            if (!isHybrid) {
+                if (i == 0) {
+                    refKeySize = kSize;
+                    refValueSize = vSize;
+                } else if (kSize != refKeySize || vSize != refValueSize) {
+                    // Non-hybrid: all layers share the same model shape, so their .k (and .v)
+                    // files must have identical sizes. Any mismatch means the cache directory
+                    // has been corrupted / partially overwritten and must be rebuilt.
+                    MNN_PRINT("Prefix cache size mismatch at layer %d: k=%zu(ref=%zu) v=%zu(ref=%zu)\n", i, kSize,
+                              refKeySize, vSize, refValueSize);
+                    mIsPrefixFileExist = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    // If the cache is deemed unusable (missing / truncated / size-mismatched /
+    // partially written), wipe all related files under prefix_cache_path for this
+    // filename so that the subsequent PendingWrite path starts from a clean slate.
+    // This is especially important for the _sync.k / _sync.v markers, which would
+    // otherwise remain and mislead the next run into thinking the cache is valid.
+    // MNNRemoveFile is a no-op on non-existent files, so this is safe to run
+    // unconditionally whenever mIsPrefixFileExist is false.
+    if (!mIsPrefixFileExist) {
+        for (int i = 0; i < mConfig->layer_nums(); i++) {
+            auto base = MNNFilePathConcat(mConfig->prefix_cache_path(), mPrefixCacheFileName) + "_" + std::to_string(i);
+            MNNRemoveFile((base + ".k").c_str());
+            MNNRemoveFile((base + ".v").c_str());
+            MNNRemoveFile((base + "_sync.k").c_str());
+            MNNRemoveFile((base + "_sync.v").c_str());
+        }
+        MNN_PRINT("Prefix cache unusable, cleaned up stale files under %s for %s\n",
+                  mConfig->prefix_cache_path().c_str(), mPrefixCacheFileName.c_str());
+    }
+
     return mIsPrefixFileExist;
 }
 
@@ -1352,7 +1495,7 @@ VARP Llm::gen_attention_mask(int seq_len) {
             if(seq_len == 1) {
                 return mAttentionMaskVarVec[0];
             }
-            if (mAttentionMaskVarVec.size() > 1 && seq_len == mDraftLength) {
+            if (mAttentionMaskVarVec.size() > 1 && seq_len == mDraftLength + 1) {
                 return mAttentionMaskVarVec[1];
             }
         }
@@ -1433,7 +1576,7 @@ VARP Llm::gen_position_ids(int seq_len) {
             }
             return mPositionIdsVarVec[0];
         }
-        if(mPositionIdsVarVec.size() > 1 && seq_len == mDraftLength) {
+        if (mPositionIdsVarVec.size() > 1 && seq_len == mDraftLength + 1) {
             auto ptr = mPositionIdsVarVec[1]->writeMap<int>();
             for (int i = 0; i < seq_len; i++) {
                 ptr[i] = i + mContext->all_seq_len;
