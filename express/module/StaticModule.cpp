@@ -387,7 +387,7 @@ StaticModule::StaticModule(std::vector<int> inputs, std::vector<int> outputs,
     MNN_ASSERT(1 == scheduleInfo.pipelineInfo.size());
     auto& bnCache = scheduleInfo.pipelineInfo[0].first;
     // Create Backend for prearrange
-    Session::createPipelineBackend(scheduleInfo.pipelineInfo[0], rt);
+    Session::createPipelineBackend(scheduleInfo.pipelineInfo[0], rt, rtm->getInside()->mContent->pMeta);
     if (nullptr == bnCache.cache.first || nullptr == bnCache.cache.second) {
         MNN_ERROR("[MNN:Express] Create Backend Error\n");
         return;
@@ -591,6 +591,10 @@ ErrorCode StaticModule::_resize(const std::vector<Express::VARP>& inputs) {
         }
         mSession->getInfo(Interpreter::RESIZE_STATUS, &curStatus);
         code = mSession->resize();
+        if (code != NO_ERROR) {
+            MNN_ERROR("StaticModule resize failed before input copy: %d\n", code);
+            return code;
+        }
         // Copy
         for (int i = 0; i < inputs.size(); ++i) {
             if (nullptr == mInputTensors[i]) {
@@ -714,7 +718,8 @@ Module* StaticModule::clone(CloneContext* ctx) const {
     // mSession->clone may construct new Backends.
     ctx->pRuntimeManager->applyMetaToRuntime();
     auto rt = ctx->pRuntimeManager->getInside()->mRuntime;
-    module->mSession.reset(mSession->clone(std::move(rt), mResource->mSharedConst));
+    module->mSession.reset(
+        mSession->clone(std::move(rt), mResource->mSharedConst, ctx->pRuntimeManager->getInside()->mContent->pMeta));
     module->resetInputOutputs();
     return this->cloneBaseTo(ctx, module);
 }

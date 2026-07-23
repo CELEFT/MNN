@@ -21,27 +21,31 @@
 namespace MNN {
 class AttentionBufExecution : public MetalExecution {
 public:
-    AttentionBufExecution(Backend *backend, bool outputC4, float attnScale, std::shared_ptr<KVQuantParameter> kvQuantParam);
+    AttentionBufExecution(Backend* backend, bool kvCache, bool outputC4, float attnScale,
+                          std::shared_ptr<KVQuantParameter> kvQuantParam);
     virtual ~AttentionBufExecution() = default;
-    virtual ErrorCode onResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs) override;
+    virtual ErrorCode onResize(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) override;
 
-    virtual void onEncode(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs, id<MTLComputeCommandEncoder> encoder) override;
+    virtual void onEncode(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs,
+                          id<MTLComputeCommandEncoder> encoder) override;
     virtual bool onClone(Backend* bn, const Op* op, Execution** dst) override {
         if (nullptr == dst) {
             return true;
         }
-        auto exe = new AttentionBufExecution(bn, mOutputC4, mAttnScale, mKVQuantParameter);
-        if (bn->getMetaPtr() == mMeta && mMeta != nullptr) {
+        auto exe = new AttentionBufExecution(bn, mKVCache, mOutputC4, mAttnScale, mKVQuantParameter);
+        if (mKVCache && bn->getMetaPtr() == mMeta && mMeta != nullptr) {
             exe->mKVCacheManager = mKVCacheManager;
         }
         *dst = exe;
+        MNN_METAL_PROFILE_REGISTER_CLONE(bn, op, *dst);
         return true;
     }
 
 private:
     void _init();
-    void compilerShader(const std::vector<Tensor *> &inputs);
+    void compilerShader(const std::vector<Tensor*>& inputs);
     void handleKVAllocMemory();
+    bool mKVCache = true;
     std::shared_ptr<MetalKVCacheManager> mKVCacheManager = nullptr;
     float mAttnScale = 0.0f;
     float mScale;
@@ -53,17 +57,18 @@ private:
     // for simd/tensor maxtrix load alignment
     int mKvAlignNum = 32;
     id<MTLComputePipelineState> mKernel_softmax = nil;
-    
+
     id<MTLComputePipelineState> mKernel_qk = nil;
     id<MTLComputePipelineState> mKernel_qkv = nil;
     id<MTLComputePipelineState> mKernel_copy = nil;
     id<MTLComputePipelineState> mKernel_qk_softmax = nil;
     id<MTLComputePipelineState> mKernelPrefill_qk = nil;
     id<MTLComputePipelineState> mKernelPrefill_qkv = nil;
+    id<MTLComputePipelineState> mKernel_flashAttn = nil;
     id<MTLBuffer> mParamQKV;
     id<MTLBuffer> mParamSoftmax;
     id<MTLBuffer> mParamCopy;
-    
+
 private:
     KVMeta* mMeta;
     bool mQkSimdReduce = false;
@@ -74,6 +79,14 @@ private:
     bool mQkvSimdMatrix = false;
     bool mDecodeQkSoftmax = false;
     bool mCopySimdReduce = false;
+    // Fused prefill flash-attention. Currently opt-in via env var
+    // MNN_ENABLE_FLASH_ATTN_PREFILL=1 and gated to head_dim in {64,128},
+    // non-quant KV, causal-only. Kernel body TBD in follow-up commit; for now
+    // this flag routes through the existing prefill_qk/softmax/prefill_qkv
+    // pipeline (i.e. no behavior change) so the wiring and eligibility check
+    // can land independently of the fused shader.
+    bool mFlashAttnPrefill = false;
+
 private:
     bool mHasMask = false;
     bool mIsAddMask = false;
@@ -89,6 +102,6 @@ private:
 };
 
 } // namespace MNN
-#endif/* MNN_SUPPORT_TRANSFORMER_FUSE */
-#endif/* MNN_METAL_ENABLED */
-#endif/* MetalAttention_hpp */
+#endif /* MNN_SUPPORT_TRANSFORMER_FUSE */
+#endif /* MNN_METAL_ENABLED */
+#endif /* MetalAttention_hpp */
