@@ -160,14 +160,17 @@ jobs:
           COMMIT=$(cat dist/*/*.commit 2>/dev/null | head -n1 || echo unknown)
           # 滚动 tag：先删旧的 nightly（不存在则跳过）
           gh release delete nightly --yes 2>/dev/null || true
-          # 创建新的 draft release，附加 4 个 tar.xz
+          # 用 heredoc 写 release notes，避免多行引号字符串的 YAML 解析问题
+          cat > notes.md <<EOF
+          MNN master @ ${COMMIT}
+          - API level: android-35 / ABI: arm64-v8a
+          - OpenCV: 4.14.0 (ocv414) 与 5.0.0 16KB-page-fix (ocv500)，各含 SEP=ON/OFF
+          - Backends: CPU (ARM82 + BF16) / OpenCL / Vulkan
+          - 构建: Ninja + NDK r30-beta2
+          - 状态: ⚠️ DRAFT，审核后手动 Publish
+          EOF
           gh release create nightly \
             dist/*/*.tar.xz \
             --draft \
             --title "MNN Android Nightly ${DATE}" \
-            --notes "MNN master @ ${COMMIT} | API35 | arm64-v8a | OpenCV 4.14.0/5.0.0 | SEP ON/OFF"
-- API level: android-35 / ABI: arm64-v8a
-- OpenCV: 4.14.0 (ocv414) 与 5.0.0 16KB-page-fix (ocv500)，各含 SEP=ON/OFF
-- Backends: CPU (ARM82 + BF16) / OpenCL / Vulkan
-- 构建: Ninja + NDK r30-beta2
-- 状态: ⚠️ DRAFT，审核后手动 Publish"
+            --notes-file notes.md
