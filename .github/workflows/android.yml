@@ -1,10 +1,16 @@
-name: Build MNN for Android API 35 (Ninja + OpenCV)
+name: Nightly Build MNN for Android API 35 (Ninja + OpenCV 4/5)
 
 on:
+  schedule:
+    - cron: '0 2 * * *'      # 每天 UTC 02:00 自动构建
+  workflow_dispatch:          # 手动触发
   push:
     branches: [ master ]
   pull_request:
     branches: [ master ]
+
+permissions:
+  contents: write
 
 jobs:
   build-android:
@@ -13,19 +19,43 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - sep: ON
-            build_dir: build-arm64-v8a-sep
-            artifact: MNN-android-api35-arm64-v8a-sep
-          - sep: OFF
-            build_dir: build-arm64-v8a
-            artifact: MNN-android-api35-arm64-v8a
+          # ===== OpenCV 4.14.0 =====
+          - opencv_version: "4.14.0"
+            opencv_zip: opencv-4.14.0-android-sdk.zip
+            opencv_url: https://github.com/opencv/opencv/releases/download/4.14.0/opencv-4.14.0-android-sdk.zip
+            sep: ON
+            build_dir: build-arm64-v8a-ocv414-sep
+            artifact: MNN-android-api35-arm64-v8a-ocv414-sep
+          - opencv_version: "4.14.0"
+            opencv_zip: opencv-4.14.0-android-sdk.zip
+            opencv_url: https://github.com/opencv/opencv/releases/download/4.14.0/opencv-4.14.0-android-sdk.zip
+            sep: OFF
+            build_dir: build-arm64-v8a-ocv414
+            artifact: MNN-android-api35-arm64-v8a-ocv414
+          # ===== OpenCV 5.0.0 (16KB page fix) =====
+          - opencv_version: "5.0.0"
+            opencv_zip: opencv-5.0.0-android-sdk-16kb-page-fix.zip
+            opencv_url: https://github.com/opencv/opencv/releases/download/5.0.0/opencv-5.0.0-android-sdk-16kb-page-fix.zip
+            sep: ON
+            build_dir: build-arm64-v8a-ocv500-sep
+            artifact: MNN-android-api35-arm64-v8a-ocv500-sep
+          - opencv_version: "5.0.0"
+            opencv_zip: opencv-5.0.0-android-sdk-16kb-page-fix.zip
+            opencv_url: https://github.com/opencv/opencv/releases/download/5.0.0/opencv-5.0.0-android-sdk-16kb-page-fix.zip
+            sep: OFF
+            build_dir: build-arm64-v8a-ocv500
+            artifact: MNN-android-api35-arm64-v8a-ocv500
 
     steps:
-      - name: Checkout MNN source
-        uses: actions/checkout@v4
-        with:
-          repository: alibaba/MNN
-          path: MNN
+      - name: Clone latest MNN master
+        run: |
+          git clone --depth 1 https://github.com/alibaba/MNN.git MNN
+          echo "MNN_COMMIT=$(git -C MNN rev-parse --short HEAD)" >> $GITHUB_ENV
+
+      # 兜底：上游已修复（无该行）时 sed 自动跳过
+      - name: Patch known upstream regression (best effort)
+        run: |
+          sed -i '/supportFp16FML/d' MNN/source/backend/arm82/Arm82Functions.cpp 2>/dev/null || true
 
       - name: Install dependencies (downgrade CMake to 3.22.1)
         run: |
@@ -43,11 +73,24 @@ jobs:
           unzip -q android-ndk-r30-beta2-linux.zip
           echo "ANDROID_NDK=$PWD/android-ndk-r30-beta2" >> $GITHUB_ENV
 
-      - name: Download and Setup OpenCV 4.13.0
+      - name: Cache OpenCV SDK
+        id: cache-opencv
+        uses: actions/cache@v4
+        with:
+          path: ${{ matrix.opencv_zip }}
+          key: opencv-android-${{ matrix.opencv_version }}
+
+      - name: Download OpenCV ${{ matrix.opencv_version }}
+        if: steps.cache-opencv.outputs.cache-hit != 'true'
         run: |
-          wget -q https://github.com/opencv/opencv/releases/download/4.13.0/opencv-4.13.0-android-sdk.zip
-          unzip -q opencv-4.13.0-android-sdk.zip
-          echo "OpenCV_DIR=$PWD/OpenCV-android-sdk/sdk/native/jni" >> $GITHUB_ENV
+          wget -q ${{ matrix.opencv_url }}
+
+      - name: Setup OpenCV ${{ matrix.opencv_version }}
+        run: |
+          unzip -q ${{ matrix.opencv_zip }}
+          # 动态定位 sdk/native/jni，兼容 4.14.0 / 5.0.0 不同顶层目录名
+          OpenCV_DIR=$(find . -maxdepth 5 -type d -path "*/sdk/native/jni" | head -n 1)
+          echo "OpenCV_DIR=$OpenCV_DIR" >> $GITHUB_ENV
 
       - name: Configure CMake for arm64-v8a (using Ninja)
         run: |
@@ -82,15 +125,13 @@ jobs:
 
       - name: Package entire build directory (with headers and libc++_shared.so)
         run: |
-          # 复制头文件到构建目录
           cp -r MNN/include ${{ matrix.build_dir }}/
-          # 复制 NDK C++ 标准库
           LIBCXX=$(find $ANDROID_NDK -name "libc++_shared.so" | grep "aarch64-linux-android" | head -n 1)
           if [ -n "$LIBCXX" ]; then
             mkdir -p ${{ matrix.build_dir }}/lib
             cp "$LIBCXX" ${{ matrix.build_dir }}/lib/
           fi
-          # 打包
+          echo "$MNN_COMMIT" > ${{ matrix.artifact }}.commit
           tar -cf - ${{ matrix.build_dir }} | xz -9e -T2 > ${{ matrix.artifact }}.tar.xz
 
       - name: Upload artifact
@@ -98,3 +139,35 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}.tar.xz
+
+  create-draft-release:
+    runs-on: ubuntu-latest
+    needs: build-android
+    if: github.event_name != 'pull_request'   # PR 不发布
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Create Draft Release (rolling nightly tag)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DATE=$(date -u +%Y%m%d)
+          COMMIT=$(cat dist/*/*.commit 2>/dev/null | head -n1 || echo unknown)
+          # 滚动 tag：先删旧的 nightly（不存在则跳过）
+          gh release delete nightly --yes 2>/dev/null || true
+          # 创建新的 draft release，附加 4 个 tar.xz
+          gh release create nightly \
+            dist/*/*.tar.xz \
+            --draft \
+            --title "MNN Android Nightly ${DATE}" \
+            --notes "MNN master @ ${COMMIT}
+- API level: android-35 / ABI: arm64-v8a
+- OpenCV: 4.14.0 (ocv414) 与 5.0.0 16KB-page-fix (ocv500)，各含 SEP=ON/OFF
+- Backends: CPU (ARM82 + BF16) / OpenCL / Vulkan
+- 构建: Ninja + NDK r30-beta2
+- 状态: ⚠️ DRAFT，审核后手动 Publish"
