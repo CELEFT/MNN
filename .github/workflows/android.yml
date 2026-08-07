@@ -1,4 +1,4 @@
-name: Build MNN for Android API 32 (Make + OpenCV)
+name: Build MNN for Android API 35 (Ninja + OpenCV)
 
 on:
   push:
@@ -9,6 +9,17 @@ on:
 jobs:
   build-android:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sep: ON
+            build_dir: build-arm64-v8a-sep
+            artifact: MNN-android-api35-arm64-v8a-sep
+          - sep: OFF
+            build_dir: build-arm64-v8a
+            artifact: MNN-android-api35-arm64-v8a
+
     steps:
       - name: Checkout MNN source
         uses: actions/checkout@v4
@@ -24,13 +35,13 @@ jobs:
           tar -xzf cmake-3.22.1-linux-x86_64.tar.gz
           sudo cp -r cmake-3.22.1-linux-x86_64/bin/* /usr/local/bin/
           sudo cp -r cmake-3.22.1-linux-x86_64/share/* /usr/local/share/
-          sudo apt-get install -y make opencl-headers xz-utils wget unzip
+          sudo apt-get install -y ninja-build make opencl-headers xz-utils wget unzip
 
-      - name: Download Android NDK r29
+      - name: Download Android NDK r30 beta2
         run: |
-          wget -q https://googledownloads.cn/android/repository/android-ndk-r29-linux.zip
-          unzip -q android-ndk-r29-linux.zip
-          echo "ANDROID_NDK=$PWD/android-ndk-r29" >> $GITHUB_ENV
+          wget -q https://googledownloads.cn/android/repository/android-ndk-r30-beta2-linux.zip
+          unzip -q android-ndk-r30-beta2-linux.zip
+          echo "ANDROID_NDK=$PWD/android-ndk-r30-beta2" >> $GITHUB_ENV
 
       - name: Download and Setup OpenCV 4.13.0
         run: |
@@ -38,11 +49,12 @@ jobs:
           unzip -q opencv-4.13.0-android-sdk.zip
           echo "OpenCV_DIR=$PWD/OpenCV-android-sdk/sdk/native/jni" >> $GITHUB_ENV
 
-      - name: Configure CMake for arm64-v8a (using Make)
+      - name: Configure CMake for arm64-v8a (using Ninja)
         run: |
-          mkdir -p build-arm64-v8a
-          cd build-arm64-v8a
+          mkdir -p ${{ matrix.build_dir }}
+          cd ${{ matrix.build_dir }}
           cmake ../MNN \
+            -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
             -DCMAKE_BUILD_TYPE=Release \
             -DANDROID_ABI=arm64-v8a \
@@ -53,33 +65,36 @@ jobs:
             -DMNN_OPENCL=ON \
             -DMNN_VULKAN=ON \
             -DMNN_JNI=ON \
-            -DMNN_SEP_BUILD=OFF \
+            -DMNN_SEP_BUILD=${{ matrix.sep }} \
             -DMNN_BUILD_OPENCV=ON \
             -DMNN_IMGCODECS=ON \
             -DMNN_SUPPORT_BF16=ON \
-            -DANDROID_NATIVE_API_LEVEL=android-32 \
+            -DANDROID_NATIVE_API_LEVEL=android-35 \
             -DMNN_BUILD_FOR_ANDROID_COMMAND=ON \
             -DNATIVE_LIBRARY_OUTPUT=./lib \
             -DNATIVE_INCLUDE_OUTPUT=. \
             -DCMAKE_INSTALL_PREFIX=$PWD/install
 
-      - name: Build MNN with Make
+      - name: Build MNN with Ninja
         run: |
-          cd build-arm64-v8a
-          make -j$(nproc)
+          cd ${{ matrix.build_dir }}
+          ninja
 
       - name: Package entire build directory (with headers and libc++_shared.so)
         run: |
-          cp -r MNN/include build-arm64-v8a/
+          # 复制头文件到构建目录
+          cp -r MNN/include ${{ matrix.build_dir }}/
+          # 复制 NDK C++ 标准库
           LIBCXX=$(find $ANDROID_NDK -name "libc++_shared.so" | grep "aarch64-linux-android" | head -n 1)
           if [ -n "$LIBCXX" ]; then
-            mkdir -p build-arm64-v8a/lib
-            cp "$LIBCXX" build-arm64-v8a/lib/
+            mkdir -p ${{ matrix.build_dir }}/lib
+            cp "$LIBCXX" ${{ matrix.build_dir }}/lib/
           fi
-          tar -cf - build-arm64-v8a | xz -9e -T2 > MNN-android-api32-arm64-v8a.tar.xz
+          # 打包
+          tar -cf - ${{ matrix.build_dir }} | xz -9e -T2 > ${{ matrix.artifact }}.tar.xz
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MNN-android-api32-arm64-v8a
-          path: MNN-android-api32-arm64-v8a.tar.xz
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.xz
