@@ -1,9 +1,9 @@
-name: Nightly Build MNN for Android API 35 (Ninja + OpenCV 4/5)
+name: Weekly Build MNN for Android API 35 (Ninja + OpenCV 4/5)
 
 on:
   schedule:
     - cron: '0 2 * * 6'    # 每周一 UTC 02:00（北京时间 10:00）
-  workflow_dispatch:          # 手动触发
+  workflow_dispatch:
   push:
     branches: [ master ]
   pull_request:
@@ -16,7 +16,7 @@ jobs:
   build-android:
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
+      fail-fast: false        # 一个失败不影响其他继续构建
       matrix:
         include:
           - opencv_version: "4.14.0"
@@ -85,7 +85,7 @@ jobs:
       - name: Setup OpenCV ${{ matrix.opencv_version }}
         run: |
           unzip -q ${{ matrix.opencv_zip }}
-          OpenCV_DIR=$(find . -maxdepth 5 -type d -path '*/sdk/native/jni' | head -n 1)
+          OpenCV_DIR=$(find . -maxdepth 5 -type d -path "*/sdk/native/jni" | head -n 1)
           echo "OpenCV_DIR=$OpenCV_DIR" >> $GITHUB_ENV
 
       - name: Configure CMake for arm64-v8a (using Ninja)
@@ -122,12 +122,11 @@ jobs:
       - name: Package entire build directory (with headers and libc++_shared.so)
         run: |
           cp -r MNN/include ${{ matrix.build_dir }}/
-          LIBCXX=$(find $ANDROID_NDK -name 'libc++_shared.so' | grep aarch64-linux-android | head -n 1)
+          LIBCXX=$(find $ANDROID_NDK -name "libc++_shared.so" | grep "aarch64-linux-android" | head -n 1)
           if [ -n "$LIBCXX" ]; then
             mkdir -p ${{ matrix.build_dir }}/lib
             cp "$LIBCXX" ${{ matrix.build_dir }}/lib/
           fi
-          echo "$MNN_COMMIT" > ${{ matrix.artifact }}.commit
           tar -cf - ${{ matrix.build_dir }} | xz -9e -T2 > ${{ matrix.artifact }}.tar.xz
 
       - name: Upload artifact
@@ -139,7 +138,7 @@ jobs:
   create-release:
     runs-on: ubuntu-latest
     needs: build-android
-    if: github.event_name != 'pull_request'
+    if: ${{ needs.build-android.result == 'success' && github.event_name != 'pull_request' }}
     permissions:
       contents: write
     steps:
@@ -156,9 +155,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           DATE=$(date -u +%Y%m%d)
-          COMMIT=$(cat dist/*/*.commit 2>/dev/null | head -n1 || echo unknown)
           gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
           gh release create nightly \
             dist/*/*.tar.xz \
             --title "MNN Android Nightly ${DATE}" \
-            --notes "MNN ${COMMIT} | API35 arm64-v8a | OpenCV 4.14.0 + 5.0.0 | SEP ON/OFF"
+            --notes "MNN | API35 arm64-v8a | OpenCV 4.14.0 + 5.0.0 | SEP ON/OFF"
