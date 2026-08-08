@@ -2,7 +2,7 @@ name: Nightly Build MNN for Android API 35 (Ninja + OpenCV 4/5)
 
 on:
   schedule:
-    - cron: '0 2 */3 * *'
+    - cron: '0 2 * * 6'
   workflow_dispatch:
   push:
     branches: [ master ]
