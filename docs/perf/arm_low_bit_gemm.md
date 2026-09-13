@@ -179,10 +179,10 @@ struct MatmulRelatedFunctions / CoreInt8Functions:
 
 | 位宽 | i8mm (smmla) | 备注 |
 |------|--------------|------|
-| W8   | 109.4        | 超过 llama.cpp Q8_0 (109) |
-| W4   | 100.7        | +29% vs llama.cpp Q4_0 (78) |
-| W3   | 50.2         | 与 llama.cpp Q3_K 持平,unsigned-domain + 4-IDX TILE_1 后从 41.3 提升 |
-| W2   | 64.5         | +58% vs llama.cpp Q2_K (41) |
+| W8   | 109.4        | 超过对手基准同位宽档 (109) |
+| W4   | 100.7        | +29% vs 对手基准同位宽档 (78) |
+| W3   | 50.2         | 与对手基准同位宽档持平,unsigned-domain + 4-IDX TILE_1 后从 41.3 提升 |
+| W2   | 64.5         | +58% vs 对手基准同位宽档 (41) |
 
 W2/W3 sdot path 的 prefill 大尺寸场景因 TILE_4/8/12 fall-through 偏慢,decode 已经达预期。
 
@@ -222,5 +222,10 @@ source/backend/cpu/compute/
   CommonOptFunction.h           # MatmulRelatedFunctions
   Int8FunctionsOpt.{h,cpp}      # CoreInt8Functions
 test/speed/GemvBWTest.cpp       # LinearRoofline benchmark (W2/W3/W4/W8)
-skills/arm-cpu-optimize/        # 优化方法论与 step 文档
+skills/cpu/                     # CPU skill 入口（纯索引，只做分流）
+  optimize/                     # 分层性能归因与路由（为什么慢、该改哪一层）
+    arch/{arm,x86_64,riscv}.md  #   诊断面：我到底跑在哪条 ISA 路径上、怎么自证
+  kernel/                       # kernel 开发 / 移植（SIMD、汇编、pack 与 ABI 契约）
+    arch/{arm,x86_64,riscv}.md  #   实现面：怎么写对、怎么被选中
+  shared/                       # 两分支共用工具：构建与跑分纪律、env 开关、RISC-V 板端验证
 ```
