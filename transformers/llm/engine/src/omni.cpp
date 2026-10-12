@@ -448,6 +448,8 @@ static MNNForwardType backend_type_convert(const std::string& type_str) {
         return MNN_FORWARD_VULKAN;
     if (type_str == "hexagon")
         return MNN_FORWARD_HEXAGON;
+    if (type_str == "qnn")
+        return MNN_FORWARD_QNN;
     if (type_str == "npu")
         return MNN_FORWARD_NN;
     return MNN_FORWARD_AUTO;
@@ -513,7 +515,7 @@ bool Omni::load() {
     }
     if (mIsEmbedding) {
         Module::Config module_config;
-        if (mConfig->backend_type() == "npu") {
+        if (mConfig->backend_type() == "npu" || mConfig->backend_type() == "qnn") {
             module_config.shapeMutable = false;
         } else {
             module_config.shapeMutable = true;
@@ -568,7 +570,7 @@ bool Omni::initProcessorRuntime() {
         setRuntimeHint(mProcessorRuntimeManager, true);
     }
     Module::Config module_config;
-    if(config.type == MNN_FORWARD_NN) {
+    if(config.type == MNN_FORWARD_NN || config.type == MNN_FORWARD_QNN) {
         module_config.shapeMutable = false;
         module_config.rearrange = false;
     } else {
@@ -2050,6 +2052,11 @@ VARP Omni::embedding(const std::vector<int>& input_ids) {
     MNN::Express::ExecutorScope s(mExecutor);
     bool hasMultimodalEmbeds = !mVisionEmbeddings.empty() || !mAudioEmbeddings.empty();
     if (!hasMultimodalEmbeds) {
+        // Decode leaves a one-token PLE in mPleInput. Rebuild it for a later text-only prefill;
+        // multimodal prefill enters the branch below and keeps its precomputed full-input PLE.
+        if (mPleEmbedding && input_ids.size() > 1) {
+            mPleInput = nullptr;
+        }
         if (mConfig->has_deepstack() && mExtraArgs.size() == 1) {
             mExtraArgs[0] = Express::_Fill(
                 _var<int>({3, static_cast<int>(input_ids.size()), mConfig->hidden_size()}, {3}), _Scalar<float>(0.0));
@@ -2200,6 +2207,23 @@ VARP Omni::embedding(const std::vector<int>& input_ids) {
     return mergedEmbed;
 }
 
+bool Omni::prepareHistoryReplay(const std::vector<int>& input_ids) {
+    // Encoder embeddings and MRoPE layouts of past multimodal spans are dropped after their prefill.
+    if (mTalker != nullptr) {
+        return false;
+    }
+    for (int id : input_ids) {
+        if (id == mVisionPad || id == mAudioPad || id == mVideoPad) {
+            return false;
+        }
+    }
+    mPositionIds.clear();
+    mVisionEmbeddings.clear();
+    mAudioEmbeddings.clear();
+    mDeepStackEmbeddings.clear();
+    return true;
+}
+
 static inline bool needNewVar(VARP var, int axis, int seq_len) {
     if (var == nullptr) {
         return true;
@@ -2208,6 +2232,10 @@ static inline bool needNewVar(VARP var, int axis, int seq_len) {
         return true;
     }
     return false;
+}
+
+VARP Omni::gen_attention_mask(int seq_len) {
+    return mIsEmbedding ? Embedding::gen_attention_mask(seq_len) : Llm::gen_attention_mask(seq_len);
 }
 
 VARP Omni::gen_position_ids(int seq_len) {

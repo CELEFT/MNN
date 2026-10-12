@@ -486,6 +486,13 @@ public:
         mBuffer = buffer;
         mAllocator = allocator;
     }
+    MetalMemRelease(MemChunk buffer, std::shared_ptr<BufferAllocator> allocator) {
+        mBuffer = buffer;
+        mAllocator = allocator.get();
+        // Keep runtime-owned static allocator alive: STATIC mem objects can outlive
+        // the MetalRuntime when user code still holds output VARPs after releasing the module.
+        mHoldAllocator = std::move(allocator);
+    }
     virtual ~ MetalMemRelease() {
         mAllocator->free(mBuffer);
     }
@@ -495,6 +502,7 @@ public:
 private:
     MemChunk mBuffer;
     BufferAllocator* mAllocator;
+    std::shared_ptr<BufferAllocator> mHoldAllocator;
 };
 size_t MetalBackend::getTensorSizeInBytes(const Tensor* tensor) const {
     auto format = TensorUtils::getDescribe(tensor)->dimensionFormat;
@@ -559,14 +567,16 @@ Backend::MemObj* MetalBackend::onAcquire(const Tensor *_tensor, StorageType stor
     // reuse if possible
     MemChunk buffer;
     BufferAllocator* allocator = nullptr;
+    std::shared_ptr<BufferAllocator> holdAllocator;
     switch (storageType) {
         case Backend::STATIC: {
-            buffer = mRuntime->mStaticAllocator->alloc(size, false);
-            allocator = mRuntime->mStaticAllocator.get();
+            holdAllocator = mRuntime->mStaticAllocator;
+            buffer = holdAllocator->alloc(size, false);
             if (nullptr == buffer.first && nullptr != mRuntime->mStaticAllocatorRaw.get()) {
-                buffer = mRuntime->mStaticAllocatorRaw->alloc(size, false);
-                allocator = mRuntime->mStaticAllocatorRaw.get();
+                holdAllocator = mRuntime->mStaticAllocatorRaw;
+                buffer = holdAllocator->alloc(size, false);
             }
+            allocator = holdAllocator.get();
         } break;
         case Backend::DYNAMIC: {
             buffer = mCurrentAllocator->alloc(size, false);
@@ -596,6 +606,9 @@ Backend::MemObj* MetalBackend::onAcquire(const Tensor *_tensor, StorageType stor
         _MetalApplyTensor((uint8_t*)(&mEmptyMem), 0, (Tensor*)_tensor);
     } else {
         _MetalApplyTensor((uint8_t*)buffer.first, buffer.second, (Tensor*)_tensor);
+    }
+    if (nullptr != holdAllocator) {
+        return new MetalMemRelease(buffer, holdAllocator);
     }
     return new MetalMemRelease(buffer, allocator);
 }
@@ -1425,6 +1438,13 @@ void MetalBackend::onCopyBuffer(const Tensor *src, const Tensor *dst, id<MTLComp
     MNN_ASSERT(false); // should not be handled here
 }
 int MetalBackend::onSync(Tensor::MapType mtype, bool toCpu, const Tensor* dstTensor) {
+    // A prior command buffer completed with an error: its kernel writes were
+    // lost, so device memory no longer matches the recorded graph. Refuse the
+    // read rather than hand back garbage (Tensor::map turns NO_EXECUTION into
+    // a nullptr with a warning, which callers already handle).
+    if (mRuntime->mCommandBufferFailed) {
+        return NO_EXECUTION;
+    }
     if (mRuntime->pExecutionStatus == NO_EXECUTION) {
 #ifdef CHECK_IOS_UI_STATUS
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
@@ -1446,13 +1466,24 @@ int MetalBackend::onSync(Tensor::MapType mtype, bool toCpu, const Tensor* dstTen
     if (toCpu) {
         wait(3);
     }
+    // The wait above may have surfaced a command buffer error; fail this read
+    // rather than letting the caller consume the lost writes.
+    if (mRuntime->mCommandBufferFailed) {
+        return NO_EXECUTION;
+    }
     return 0;
 }
 id<MTLCommandBuffer> MetalBackend::getCommandBufferForBufferCopy() const {
     if (nil == _commandBuffer) {
         _commandBuffer = [_commandQueue commandBuffer];
+        mWaitForCompletedHandlers = false;
     }
     return _commandBuffer;
+}
+void MetalBackend::addCompletedHandler(MTLCommandBufferHandler handler) const {
+    auto buffer = getCommandBufferForBufferCopy();
+    mWaitForCompletedHandlers = true;
+    [buffer addCompletedHandler:handler];
 }
 id<MTLCommandBuffer> MetalBackend::getCommandBufferForNet() const {
     return getCommandBufferForBufferCopy();
@@ -1571,6 +1602,14 @@ void MetalBackend::commit() const {
         }];
 #endif
         [_commandBuffer commit];
+        if (mWaitForCompletedHandlers) {
+            // Completed status alone does not join the prefix-save handlers or protect their live state reads.
+            [_commandBuffer waitUntilCompleted];
+            if (_commandBuffer.error) {
+                MNN_ERROR("[METAL] command buffer error: %s\n", _commandBuffer.error.localizedDescription.UTF8String);
+                mRuntime->mCommandBufferFailed = true;
+            }
+        }
         mRuntime->_waiting = _commandBuffer;
         mLastOwnCommandBuffer = _commandBuffer;
         _commandBuffer = nil;
@@ -1581,6 +1620,10 @@ void MetalBackend::waitOwnInflight() const {
     if (nil != mLastOwnCommandBuffer) {
         if (mLastOwnCommandBuffer.status < MTLCommandBufferStatusCompleted) {
             [mLastOwnCommandBuffer waitUntilCompleted];
+        }
+        if (mLastOwnCommandBuffer.error) {
+            MNN_ERROR("[METAL] command buffer error: %s\n", mLastOwnCommandBuffer.error.localizedDescription.UTF8String);
+            mRuntime->mCommandBufferFailed = true;
         }
         mLastOwnCommandBuffer = nil;
     }
@@ -1596,6 +1639,7 @@ void MetalBackend::wait(int traceSite) const {
         if (buffer.status >= MTLCommandBufferStatusCompleted) {
             if (buffer.error) {
                 MNN_ERROR("[METAL] command buffer error: %s\n", buffer.error.localizedDescription.UTF8String);
+                mRuntime->mCommandBufferFailed = true;
             }
             mRuntime->_waiting = nil;
             return;
@@ -1632,6 +1676,7 @@ void MetalBackend::wait(int traceSite) const {
 #endif
             if (buffer.error) {
                 MNN_ERROR("[METAL] command buffer error: %s\n", buffer.error.localizedDescription.UTF8String);
+                mRuntime->mCommandBufferFailed = true;
             }
             mRuntime->_waiting = nil;
             return;
@@ -1668,6 +1713,7 @@ void MetalBackend::wait(int traceSite) const {
 
         if (buffer.error) {
             MNN_ERROR("[METAL] command buffer error: %s\n", buffer.error.localizedDescription.UTF8String);
+            mRuntime->mCommandBufferFailed = true;
         }
     }
     mRuntime->_waiting = nil;

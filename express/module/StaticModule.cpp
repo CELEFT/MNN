@@ -84,9 +84,18 @@ static bool cloneBaseExecution(std::shared_ptr<Execution>& exe, const ExecutionC
     }
     Execution* copyExecution = nullptr;
     auto baseExe = iter->second.get();
-    baseExe->onClone(backend, op, &copyExecution);
+    auto srcBackend = baseExe->backend();
+    // Clone onto the backend whose type matches the source, same rule as Session::clone. Otherwise an
+    // execution the base put on the backup backend gets moved onto the primary one, which may lack the kernel.
+    Backend* prefer = backend;
+    Backend* fallback = backupBackend;
+    if (nullptr != srcBackend && srcBackend->type() != backend->type() && srcBackend->type() == backupBackend->type()) {
+        prefer = backupBackend;
+        fallback = backend;
+    }
+    baseExe->onClone(prefer, op, &copyExecution);
     if (copyExecution == nullptr) {
-        baseExe->onClone(backupBackend, op, &copyExecution);
+        baseExe->onClone(fallback, op, &copyExecution);
     }
     std::unique_ptr<Execution> cloned(copyExecution);
     if (cloned == nullptr || !cloned->onClone(nullptr, op, nullptr)) {
@@ -243,10 +252,10 @@ static std::vector<std::shared_ptr<BufferStorage>> preRearrangeWeights( // NOLIN
             case MNN::OpType_FusedLinear: {
                 cloneBaseExecution(exe, base_executions, op, backend, backupBackend);
                 if (exe == nullptr) {
-                    // Only Metal / OpenCL execute FusedLinear natively; other
-                    // backends decompose it in geometry, so pre-creation would
-                    // always fail.
-                    if (backend->type() != MNN_FORWARD_METAL && backend->type() != MNN_FORWARD_OPENCL) {
+                    // Pre-create only on backends with a native or composite
+                    // FusedLinear execution; the others decompose it in geometry.
+                    if (backend->type() != MNN_FORWARD_METAL && backend->type() != MNN_FORWARD_OPENCL &&
+                        backend->type() != MNN_FORWARD_CPU && backend->type() != MNN_FORWARD_CPU_EXTENSION) {
                         break;
                     }
                     std::shared_ptr<BufferStorage> tmpstorage;
@@ -626,6 +635,7 @@ ErrorCode StaticModule::_resize(const std::vector<Express::VARP>& inputs) {
                 mInputTensors[i]->buffer().host = srcPtr;
                 mInputTensors[i]->buffer().device = 0;
                 TensorUtils::getDescribeOrigin(mInputTensors[i])->setBackend(pipelineInfo.first.cache.second.get());
+                TensorUtils::getDescribeOrigin(mInputTensors[i])->cpuDynamicNode = nullptr;
                 if (nullptr == srcDes->quantAttr.get()) {
                     // For device need copy, cache device tensor
                     auto cacheIter = pipelineInfo.first.inputTensorCopyCache.find(mInputTensors[i]);

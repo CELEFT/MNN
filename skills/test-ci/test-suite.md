@@ -60,6 +60,17 @@ Valid filters: `all` (default) · `cpu` · `opencl` · `opencl-image` ·
 * Combined stdout/stderr for every stage is saved under
   `logs/test-<UTC-timestamp>/<stage>.log` — read the named log of a failing
   stage for the trailing output. `rc=137` ≈ OOM-kill, `rc=139` ≈ SIGSEGV.
+* **`run_test.out` prints `√√√ all <filter> tests passed` even when the filter
+  matched nothing.** Judge by the `passed:N` count in
+  `TEST_CASE_AMOUNT_UNIT` / `TEST_CASE` — `passed:0` means the case never ran
+  (wrong filter name, or the file was never compiled in; see § Adding a new
+  test). Never read the all-passed line as proof that a specific test ran.
+* `skipped:N` in the same line counts cases that gated themselves off the
+  running backend through `MNNTEST_CPU_ONLY()` (`test/MNNTestSuite.h`); they are
+  excluded from `passed`. A green Metal run reporting `skipped:6` means
+  `op/AvePool3d`, `op/Interp`, `op/InterpInt8` and
+  `op/unary/{erf,erfc,erfinv}Int8` never executed — not that they passed. Each
+  gate site records the backend gap it stands in for.
 * When a remote transport has a shorter timeout than the device workload, a
   blank or truncated client response does not prove that the process exited.
   Write results on the device, then poll the process and result-file size
@@ -158,13 +169,40 @@ recommending deletion:
   `test_stages.json` self-documentation, developer docs, skill docs, and code
   comments in the same change so the old entrypoint disappears completely.
 
-## Adding a new operator test
+## Bugfix 单测提交原则
 
-1. Write the C++ test under `test/op/` (one file, registered with
-   `MNNTestSuiteRegister`). The full template + conventions are in
+- **不默认给每个 bugfix 新增仓库单测**。优先复用已有测试、模型 smoke 或最小复现验证，避免重复用例和
+  一次性复现代码持续膨胀。
+- **开发时可以写临时单测，但不要随修复提交**。临时用例或脚本留在本地或临时目录，提交前从 diff 中
+  排除；它们用于定位和验证，不自动成为仓库的长期维护内容。
+- **提交到仓库的单测必须审查必要性，理由充分才添加**。评估现有覆盖的缺口、问题再次发生的风险与影响、
+  用例能否稳定捕获回归，以及代码量、构建/运行和维护成本；在 CR/PR 中说明为什么已有验证不足、
+  该用例有什么长期价值。仅为证明本次修复有效、重复已有覆盖或照抄实现逻辑，不足以支持新增单测。
+- **确需长期覆盖时，优先小幅扩展已有用例**，再考虑新增独立单测；保持用例最小，并确认修复前失败、
+  修复后通过。不提交新增单测也必须完成修复验证，在 CR/PR 中记录复现方式、修复前后结果和已执行的验证。
+
+## Adding a new test
+
+For bugfixes, first apply the [unit-test submission policy](#bugfix-单测提交原则).
+Use the steps below when a committed test is warranted; a bugfix alone does not require adding one.
+
+1. Write the C++ test under `test/<area>/` (one file, registered with
+   `MNNTestSuiteRegister`). For operators the full template + conventions are in
    [`docs/testing.md`](../../docs/testing.md) § "新增算子测试".
-2. If its name prefix matches an existing stage (e.g. `op/*`), it is picked up
-   automatically — no JSON change needed. Otherwise add a dedicated stage.
+2. **Re-run `cmake` before building.** `test/CMakeLists.txt` collects sources
+   with `GLOB_RECURSE`, which CMake expands at **configure** time — a new file
+   is *not* picked up by an incremental `cmake --build`, and the test is simply
+   absent from `run_test.out` with no error. Run `cmake .` in the build dir (or
+   delete it) first, then confirm the case actually ran via `passed:N`
+   (see § Reading the result) — not via the all-passed line.
+3. If its name prefix matches an existing stage (e.g. `op/*`, `core/*`), it is
+   picked up automatically — no JSON change needed. Otherwise add a dedicated
+   stage.
+4. **Check that the test can actually fail.** Reintroduce the bug (or revert the
+   fix) and confirm the test goes red; a test that passes on the broken code is
+   worse than no test, because it manufactures confidence. See
+   [general-debug §3](../general-debug/concurrency.md) for the case where a runtime
+   test *cannot* work and the invariant must be asserted at compile time.
 
 ### Attention causal-mask assumption (⚠️ non-causal models on Metal)
 

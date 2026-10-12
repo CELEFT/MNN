@@ -177,6 +177,14 @@ private:
     bool mPreferM64Gemm = false;
     bool mHighBandwidthM4 = false;
     size_t mMaxThreadSize;
+    // Sticky session failure: set when a committed command buffer completes
+    // with an error (e.g. discarded by iOS as kIOGPUCommandBufferCallback
+    // ErrorInnocentVictim during GPU memory-pressure recovery). Unlike
+    // pExecutionStatus this is never auto-reset by commit(): the discard
+    // silently dropped kernel writes, so every tensor produced afterwards is
+    // potentially corrupt and all later device->host reads must fail instead
+    // of returning garbage. onSync gates on it.
+    mutable bool mCommandBufferFailed = false;
 };
 
 
@@ -295,6 +303,8 @@ public:
         return mRuntime->mStaticAllocator.get();
     }
     id<MTLCommandBuffer> getCommandBufferForBufferCopy() const;
+    // commit() joins these handlers before their source state can be reused.
+    void addCompletedHandler(MTLCommandBufferHandler handler) const;
 
     bool isCmdBufferCommit();
 #if MNN_METAL_OP_PROFILE
@@ -415,6 +425,7 @@ private:
     id<MTLCommandBuffer> getCommandBufferForNet() const;
     id<MTLComputeCommandEncoder> encoder_net() const;
     mutable id<MTLCommandBuffer> _commandBuffer = nil;
+    mutable bool mWaitForCompletedHandlers = false;
     // Per-backend fence: the last command buffer THIS backend committed.
     // onResizeBegin only needs to wait for our own in-flight work before
     // resetting our allocator; draining the shared runtime's last commit

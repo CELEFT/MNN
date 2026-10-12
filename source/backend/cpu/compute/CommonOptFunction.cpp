@@ -35,6 +35,8 @@ using Vec = MNN::Math::Vec<float, 4>;
 #endif
 
 #ifdef MNN_USE_RVV
+#include "backend/cpu/riscv/rvv/MNNRvvC4Functions.hpp"
+#include "../riscv/rvv/MNNRvvMatMulFunctions.hpp"
 extern void MNNAbsMaxFP32_RVV(const float* source, float* absmax, size_t src_depth_quad, size_t realSize, int pack);
 extern void MNNAccumulateSequenceNumber_RVV(float* dst, const float* src, int size);
 extern void MNNAsyQuantFunc_RVV(int8_t* dst, const float* src, float* qscale, float* qbias, const size_t* info);
@@ -81,6 +83,31 @@ extern void MNNPackCUnitInt16_RVV(int16_t*, const int16_t*, size_t, size_t, int*
 extern void MNNUnpackCUnitInt16_RVV(int16_t*, const int16_t*, size_t, size_t, int*);
 extern void MNNPackCUnitTransposeInt16_RVV(int16_t*, const int16_t*, size_t, size_t, int*);
 extern void MNNUnpackCUnitTransposeInt16_RVV(int16_t*, const int16_t*, size_t, size_t, int*);
+extern void MNNCountMaxMinValue_RVV(const float* source, float* minVal, float* maxVal, size_t size);
+extern void MNNReluInt8_RVV(int8_t* dst, const int8_t* src, size_t size, ssize_t zeroPoint);
+// The RVV kernels below are defined in the global namespace (they are plain C-style
+// symbols in source/backend/cpu/riscv/rvv/*.cpp), so their declarations must stay
+// outside namespace MNN as well. Declaring them inside the namespace mangles the
+// names as MNN::MNNMatrixAdd_RVV and breaks the link.
+extern void MNNMatrixAdd_RVV(float* C, const float* A, const float* B, size_t widthC4, size_t cStride,
+                             size_t aStride, size_t bStride, size_t height);
+extern void MNNMatrixSub_RVV(float* C, const float* A, const float* B, size_t widthC4, size_t cStride,
+                             size_t aStride, size_t bStride, size_t height);
+extern void MNNDeconvRunForUnitDepthWise_RVV(const float* dst, float* src, const float* weight, size_t fw, size_t fh,
+                                             size_t weight_y_step, size_t dilateX_step, size_t dilateY_step);
+extern void MNNConvRunForLineDepthwise_RVV(float* dst, const float* src, const float* weight, size_t width,
+                                           size_t src_w_setup, size_t fw, size_t fh, size_t dilateX_step,
+                                           size_t dilateY_step, size_t height, size_t srcHStep, size_t dstHStep,
+                                           const float* bias, const float* parameters);
+extern void MNNSamplerC4Bilinear_RVV(const unsigned char* source, unsigned char* dest, MNN::CV::Point* points,
+                                     size_t sta, size_t count, size_t capacity, size_t iw, size_t ih, size_t yStride);
+extern void MNNExpC8_RVV(float* dest, const float* source, float* offset, const float* parameters, size_t countC8);
+extern void MNNNorm_RVV(float* dst, const float* src, const float* gamma, const float* beta, float epsilon, size_t size,
+                        bool RMSNorm);
+extern void MNNGeluCommon_RVV(float* dst, const float* src, size_t size);
+extern void MNNGeluStandardCommon_RVV(float* dst, const float* src, size_t size);
+extern void MNNSiLu_RVV(float* dst, const float* src, size_t dataSize);
+extern void MNNSiLuLowp_RVV(float* dst, const float* src, size_t dataSize);
 namespace MNN {
 void MNNRvvInitializeFastPathFunctions(CoreFunctions* core);
 }
@@ -563,7 +590,7 @@ static void MNNAsyQuantInfo_FP32(float* scale, float* bias, float* qscale, float
                 qscale[qind] = 255.f / (max_ - min_);
                 qbias[qind] = roundf(-min_ * 255.f / (max_ - min_)) - 128.0f;
                 scale[sind] = (max_ - min_) / 255.f;
-                bias[sind] = min_ + (128.f / 255.f) * (max_ - min_);
+                bias[sind] = -qbias[qind] * scale[sind];
             }
         }
     }
@@ -2920,8 +2947,13 @@ void MNNUnpackC4(float* dst, const float* src, size_t area, size_t depth, int* a
     MNNUnpackC4Common<float>(dst, src, area, depth, areaOffset);
 }
 
-#ifndef MNN_USE_RVV
 void MNNExpC8(float* dest, const float* source, float* offset, const float* parameters, size_t countC8) {
+#ifdef MNN_USE_RVV
+    if (MNN::MNNGetCoreFunctions()->supportRVV) {
+        MNNExpC8_RVV(dest, source, offset, parameters, countC8);
+        return;
+    }
+#endif
     auto count = countC8 * 8;
     auto param = parameters[0];
     float xLimit = 87;
@@ -2944,7 +2976,6 @@ void MNNExpC8(float* dest, const float* source, float* offset, const float* para
     }
     offset[3] = summer;
 }
-#endif
 
 void MNNSoftmax(float* softmaxDst, const float* softmaxSrc, float* runningMax, float* runningSum, float* updateScale,
                 int outside, int reduceSize, int kvSeqOffset, int validOffset, int pack, bool mask) {
@@ -3334,9 +3365,14 @@ void MNNGridSampleComputeCord3D(float* dst, const float* src, size_t inD, size_t
 }
 
 #ifndef MNN_USE_SSE
-#ifndef MNN_USE_RVV
 void MNNNorm(float* dst, const float* src, const float* gamma, const float* beta, float epsilon, size_t size,
              bool RMSNorm) {
+#ifdef MNN_USE_RVV
+    if (MNN::MNNGetCoreFunctions()->supportRVV) {
+        MNNNorm_RVV(dst, src, gamma, beta, epsilon, size, RMSNorm);
+        return;
+    }
+#endif
     float mean = 0;
     if (false == RMSNorm) {
         float sum = 0.f;
@@ -3521,7 +3557,6 @@ void MNNNorm(float* dst, const float* src, const float* gamma, const float* beta
     }
 #endif
 }
-#endif // MNN_USE_RVV
 #endif // MNN_USE_SSE
 
 void MNNRoiPoolingMax(float* dst, const float* src, int hLen, int wLen, int iw) {
@@ -3992,14 +4027,25 @@ void MNNHardSwishCommon(float* dst, const float* src, size_t size) {
 #endif
 }
 
-#ifndef MNN_USE_RVV
 void MNNGeluStandardCommon(float* dst, const float* src, size_t size) {
+#ifdef MNN_USE_RVV
+    if (MNN::MNNGetCoreFunctions()->supportRVV) {
+        MNNGeluStandardCommon_RVV(dst, src, size);
+        return;
+    }
+#endif
     for (int i = 0; i < size; i++) {
         dst[i] = (erf(src[i] * 0.7071067932881648) + 1) * src[i] * 0.5;
     }
 }
 
 void MNNGeluCommon(float* dst, const float* src, size_t size) {
+#ifdef MNN_USE_RVV
+    if (MNN::MNNGetCoreFunctions()->supportRVV) {
+        MNNGeluCommon_RVV(dst, src, size);
+        return;
+    }
+#endif
     int sizeQuad = static_cast<int32_t>(size / 8);
     int remain = static_cast<int32_t>(size) % 8;
 #if defined(MNN_USE_SSE) || defined(MNN_USE_NEON)
@@ -4034,7 +4080,6 @@ void MNNGeluCommon(float* dst, const float* src, size_t size) {
     }
 #endif
 }
-#endif
 
 void MNNScaleAndAddBiasScalar(float* dst, const float* src, float bias, float alpha, size_t number) {
     int numberC4 = (int)number / 4;
@@ -4664,15 +4709,19 @@ void MNNSigmoid(float* dst, const float* src, size_t dataSize) {
     }
 }
 
-#ifndef MNN_USE_RVV
 void MNNSiLu(float* dst, const float* src, size_t dataSize) {
+#ifdef MNN_USE_RVV
+    if (MNN::MNNGetCoreFunctions()->supportRVV) {
+        MNNSiLu_RVV(dst, src, dataSize);
+        return;
+    }
+#endif
     float offset[4] = {-1.0f, 0.0f, 0.0f, 0.0f};
     MNNExp(dst, src, offset, dataSize);
     for (int i = 0; i < dataSize; ++i) {
         dst[i] = src[i] / (1.0f + dst[i]);
     }
 }
-#endif
 
 /**
  Modified from https://github.com/alibaba/MNN/pull/1359
@@ -4714,8 +4763,13 @@ void MNNSigmoidLowp(float* dst, const float* src, size_t dataSize) {
 #endif
 }
 
-#ifndef MNN_USE_RVV
 void MNNSiLuLowp(float* dst, const float* src, size_t dataSize) {
+#ifdef MNN_USE_RVV
+    if (MNN::MNNGetCoreFunctions()->supportRVV) {
+        MNNSiLuLowp_RVV(dst, src, dataSize);
+        return;
+    }
+#endif
     float offset[4] = {-1.0f, 0.0f, 0.0f, 0.0f};
     MNNExp(dst, src, offset, dataSize);
 #ifdef __aarch64__
@@ -4757,7 +4811,6 @@ void MNNSiLuLowp(float* dst, const float* src, size_t dataSize) {
     }
 #endif
 }
-#endif
 
 static void _MNNAdjustOptimalSparseKernel(int& sparseBlockOC,
                                           MNN::CoreFunctions::MNNPackedSparseMatMul& packedSparseMatMul) {
@@ -5126,6 +5179,7 @@ void MNNCoreFunctionInit() {
     gCoreFunction->MNNRoPECompute = MNNRoPEComputeBasic;
 
     gCoreFunction->MNNReluWithSlopeChannel = MNNReluWithSlopeChannel;
+    gCoreFunction->MNNReluInt8 = MNNReluInt8;
     gCoreFunction->MNNPoolingAvg = (decltype(gCoreFunction->MNNPoolingAvg))(poolingAvg<float, Vec4, 4>);
     // Set min value as 1 << 24
     gCoreFunction->MNNPoolingMax = (decltype(gCoreFunction->MNNPoolingMax))(poolingMax<float, Vec4, 4, -16777216>);
@@ -5220,6 +5274,10 @@ void MNNCoreFunctionInit() {
 
 #if defined(__riscv) && defined(MNN_USE_RVV)
     if (gCoreFunction->supportRVV) {
+        gCoreFunction->MNNScaleAndAddBias = MNNScaleAndAddBias_RVV;
+        gCoreFunction->MNNReluWithSlopeChannel = MNNReluWithSlopeChannel_RVV;
+        gCoreFunction->MNNComputeMatMulForE_1 = MNNComputeMatMulForE_1_RVV;
+        gCoreFunction->MNNConvRunForLineDepthwise = MNNConvRunForLineDepthwise_RVV;
         gCoreFunction->MNNAccumulateSequenceNumber = MNNAccumulateSequenceNumber_RVV;
         gCoreFunction->MNNSumByAxisLForMatmul_A = MNNSumByAxisLForMatmul_A_RVV;
         gCoreFunction->MNNReorderWeightInt4 = MNNReorderWeightInt4_RVV;
@@ -5242,6 +5300,13 @@ void MNNCoreFunctionInit() {
         gCoreFunction->MNNUnpackCUnitInt16 = MNNUnpackCUnitInt16_RVV;
         gCoreFunction->MNNPackCUnitTransposeInt16 = MNNPackCUnitTransposeInt16_RVV;
         gCoreFunction->MNNUnpackCUnitTransposeInt16 = MNNUnpackCUnitTransposeInt16_RVV;
+        gCoreFunction->MNNCountMaxMinValue = MNNCountMaxMinValue_RVV;
+        gCoreFunction->MNNReluInt8 = MNNReluInt8_RVV;
+        gCoreFunction->MNNMatrixAdd = MNNMatrixAdd_RVV;
+        gCoreFunction->MNNMatrixSub = MNNMatrixSub_RVV;
+        gCoreFunction->MNNDeconvRunForUnitDepthWise = MNNDeconvRunForUnitDepthWise_RVV;
+        gCoreFunction->MNNSamplerC4Bilinear = MNNSamplerC4Bilinear_RVV;
+
         MNNRvvInitializeFastPathFunctions(gCoreFunction);
 #ifdef MNN_SUPPORT_TRANSFORMER_FUSE
         gCoreFunction->MNNQuantAttentionKey = MNNQuantAttentionKey_RVV;

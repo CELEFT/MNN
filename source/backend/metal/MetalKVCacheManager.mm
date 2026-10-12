@@ -34,7 +34,7 @@ void MetalKVCacheManager::onAlloc(KVMeta* meta, int seq_len) {
     if(mMeta != nullptr && mMeta->file_name.size() > 0 && mMeta->file_flag == KVMeta::PendingRead) {
         // create new files
         std::string pathk    = MNNFilePathConcat(mConfig.mPrefixCacheDir, mMeta->file_name) + "_" + std::to_string(mMeta->layer_index) + ".k";
-        std::string pathv    = MNNFilePathConcat(mConfig.mPrefixCacheDir, mMeta->file_name) + "_" + std::to_string(mMeta->layer_index++) + ".v2";
+        std::string pathv    = MNNFilePathConcat(mConfig.mPrefixCacheDir, mMeta->file_name) + "_" + std::to_string(mMeta->layer_index++) + ".v";
         mMeta->layer_index = mMeta->layer_index % mMeta->layer_nums;
         auto old_key_fd   = MNNOpenFile(pathk.c_str(), MNN_FILE_READ | MNN_FILE_WRITE);
         auto old_value_fd = MNNOpenFile(pathv.c_str(), MNN_FILE_READ | MNN_FILE_WRITE);
@@ -98,7 +98,7 @@ void MetalKVCacheManager::onAlloc(KVMeta* meta, int seq_len) {
         if(mMeta != nullptr) {
             mBasePrefixFileName = MNNFilePathConcat(mConfig.mPrefixCacheDir, mMeta->file_name) + "_" + std::to_string(mMeta->layer_index);
             keyStoredDst = sharePrefixKv ? mBasePrefixFileName + ".k" : "";
-            valueStoredDst = sharePrefixKv ? mBasePrefixFileName + ".v2" : "";
+            valueStoredDst = sharePrefixKv ? mBasePrefixFileName + ".v" : "";
             mMeta->layer_index++;
             mMeta->layer_index = mMeta->layer_index % mMeta->layer_nums;
         }
@@ -112,6 +112,12 @@ void MetalKVCacheManager::onAlloc(KVMeta* meta, int seq_len) {
             int scaleByte = mtbn->useFp16InsteadFp32() ? 2 : 4;
             mKScaleBuffer = [[context device] newBufferWithLength:mMaxLength * scaleByte * 2 options:MTLResourceStorageModeShared];
             mVScaleBuffer = [[context device] newBufferWithLength:mMaxLength * scaleByte * 2 options:MTLResourceStorageModeShared];
+            // Zero the whole scale/bias tail: dequant(0) = bias, so the K/V
+            // memset above only makes padded tokens vanish if bias is 0 too.
+            // Uninitialized bias bits can decode as Inf/NaN and 0*NaN = NaN
+            // poisons the AV matmul for recycled (non-zero) pages.
+            ::memset([mKScaleBuffer contents], 0, mMaxLength * scaleByte * 2);
+            ::memset([mVScaleBuffer contents], 0, mMaxLength * scaleByte * 2);
         } else {
             mKScaleBuffer = nil;
             mVScaleBuffer = nil;
@@ -143,6 +149,10 @@ void MetalKVCacheManager::onAlloc(KVMeta* meta, int seq_len) {
             int scaleByte = mtbn->useFp16InsteadFp32() ? 2 : 4;
             mKScaleBuffer = [[context device] newBufferWithLength:mMaxLength * scaleByte * 2 options:MTLResourceStorageModeShared];
             mVScaleBuffer = [[context device] newBufferWithLength:mMaxLength * scaleByte * 2 options:MTLResourceStorageModeShared];
+            // See the in-disk branch above: zero scale+bias so padded tokens
+            // dequantize to 0 instead of uninitialized (possibly NaN) bias.
+            ::memset([mKScaleBuffer contents], 0, mMaxLength * scaleByte * 2);
+            ::memset([mVScaleBuffer contents], 0, mMaxLength * scaleByte * 2);
         } else {
             mKScaleBuffer = nil;
             mVScaleBuffer = nil;
@@ -296,6 +306,10 @@ bool MetalKVCacheManager::expandKVCacheInMem(size_t oldSize, int copy_len, bool 
         int scaleByte = mtbn->useFp16InsteadFp32() ? 2 : 4;
         id<MTLBuffer> newKScale = [[context device] newBufferWithLength:mMaxLength * scaleByte * 2 options:MTLResourceStorageModeShared];
         id<MTLBuffer> newVScale = [[context device] newBufferWithLength:mMaxLength * scaleByte * 2 options:MTLResourceStorageModeShared];
+        // Zero before the copy so the grown tail past copy_len is not left
+        // uninitialized (padded tokens must dequantize to 0, see onAlloc).
+        ::memset([newKScale contents], 0, mMaxLength * scaleByte * 2);
+        ::memset([newVScale contents], 0, mMaxLength * scaleByte * 2);
         if (need_copy && mKScaleBuffer != nil) {
             ::memcpy([newKScale contents], [mKScaleBuffer contents], (size_t)copy_len * scaleByte * 2);
             ::memcpy([newVScale contents], [mVScaleBuffer contents], (size_t)copy_len * scaleByte * 2);
@@ -332,6 +346,10 @@ void MetalKVCacheManager::expandKVCacheInDisk(size_t oldSize, size_t curSize, in
         int scaleByte = mtbn->useFp16InsteadFp32() ? 2 : 4;
         id<MTLBuffer> newKScale = [[context device] newBufferWithLength:mMaxLength * scaleByte * 2 options:MTLResourceStorageModeShared];
         id<MTLBuffer> newVScale = [[context device] newBufferWithLength:mMaxLength * scaleByte * 2 options:MTLResourceStorageModeShared];
+        // Zero before the copy so the grown tail past copy_len is not left
+        // uninitialized (padded tokens must dequantize to 0, see onAlloc).
+        ::memset([newKScale contents], 0, mMaxLength * scaleByte * 2);
+        ::memset([newVScale contents], 0, mMaxLength * scaleByte * 2);
         if (need_copy && mKScaleBuffer != nil) {
             ::memcpy([newKScale contents], [mKScaleBuffer contents], (size_t)copy_len * scaleByte * 2);
             ::memcpy([newVScale contents], [mVScaleBuffer contents], (size_t)copy_len * scaleByte * 2);
@@ -359,22 +377,8 @@ void MetalKVCacheManager::onClear() {
         mKeyBuffer = nil;
         mValueBuffer = nil;
 
-        // mSaveShareKvPrefix also need unmap file
         unmapKVCache(mCurrentTotalSize, mCurrentTotalSize);
-        if(mSaveShareKvPrefix) {
-            // set prefix cachefile validation
-            auto k_file = mBasePrefixFileName + ".k";
-            if(MNNFileExist(k_file.c_str())) {
-                auto k_sync_file = mBasePrefixFileName + "_sync.k";
-                MNNCreateFile(k_sync_file.c_str());
-            }
-            auto v_file = mBasePrefixFileName + ".v2";
-            if(MNNFileExist(v_file.c_str())) {
-                auto v_sync_file = mBasePrefixFileName + "_sync.v2";
-                MNNCreateFile(v_sync_file.c_str());
-            }
-        } else {
-            // delete temp kvcache file
+        if (!mSaveShareKvPrefix) {
             removeKVCacheFile();
         }
         mKVCacheInDisk = false;
