@@ -9,6 +9,17 @@ class ModelMapper:
 
     def get_map(self, config):
         model_type = config.model_type
+        if model_type == 'minicpmv4_7':
+            text_type = config.text_config.model_type
+            backbones = {'qwen3_5_text': 'qwen3_5', 'qwen3_5_moe_text': 'qwen3_5_moe'}
+            if text_type not in backbones:
+                raise ValueError(f'Unsupported MiniCPM-V 4.7 text model: {text_type}')
+            model_map = copy.deepcopy(self.mapper[backbones[text_type]])
+            model_map['model'].update({
+                'visual': 'model.vision_tower',
+                'visual.merger': 'model.merger',
+            })
+            return model_type, model_map
         if model_type == 'chatglm':
             if hasattr(config, 'vocab_size') and config.vocab_size == 130528:
                 model_type = 'chatglm'
@@ -706,8 +717,20 @@ class ModelMapper:
             'final_layernorm': 'model.language_model.norm',
             'visual': 'model.visual'
         }
+        # transformers>=5.0 nests text fields under `text_config.*` and drops the
+        # flat top-level attributes; list each candidate so both layouts resolve.
+        qwen2vl_config = {
+            'hidden_size': ['text_config.hidden_size', 'hidden_size'],
+            'head_dim': ['text_config.head_dim', 'head_dim'],
+            'num_attention_heads': ['text_config.num_attention_heads', 'num_attention_heads'],
+            'num_hidden_layers': ['text_config.num_hidden_layers', 'num_hidden_layers'],
+            'num_key_value_heads': ['text_config.num_key_value_heads', 'num_key_value_heads'],
+            'rope_theta': ['text_config.rope_theta', 'rope_theta'],
+            'rope_scaling': ['text_config.rope_scaling', 'rope_scaling'],
+            'max_position_embeddings': ['text_config.max_position_embeddings', 'max_position_embeddings']
+        }
         qwen2vl_map = {
-            'config': self.default_config,
+            'config': qwen2vl_config,
             'model': qwen2vl_model,
             'decoder': self.default_decoder,
             'attention': self.default_attention
@@ -1268,12 +1291,20 @@ class ModelMapper:
         # e.g., 'visual' is processed before 'visual.connector' for SmolVLM
         for dst_path, src_path in sorted(mapping.items(), key=lambda x: x[0]):
             # --- 1. Retrieve value from source ---
-            val = src
-            for attr in src_path.split('.'):
-                if hasattr(val, attr):
-                    val = getattr(val, attr)
-                else:
-                    val = None
+            # `src_path` may be a list of candidate paths (e.g.
+            # ['text_config.hidden_size', 'hidden_size']); the first candidate
+            # that resolves to a non-None value wins.
+            candidates = src_path if isinstance(src_path, (list, tuple)) else [src_path]
+            val = None
+            for candidate in candidates:
+                val = src
+                for attr in candidate.split('.'):
+                    if hasattr(val, attr):
+                        val = getattr(val, attr)
+                    else:
+                        val = None
+                        break
+                if val is not None:
                     break
 
             # --- 2. Navigate to destination parent node ---
