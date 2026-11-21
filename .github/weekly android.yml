@@ -1,0 +1,153 @@
+name: Weekly Build MNN for Android API 35 (Ninja + OpenCV 4/5)
+
+on:
+  schedule:
+    - cron: '0 2 * * 6'    # 每周一 UTC 02:00（北京时间 10:00）
+  workflow_dispatch:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+permissions:
+  contents: write
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false        # 一个失败不影响其他继续构建
+      matrix:
+        include:
+          - opencv_version: "4.14.0"
+            opencv_zip: opencv-4.14.0-android-sdk.zip
+            opencv_url: https://github.com/opencv/opencv/releases/download/4.14.0/opencv-4.14.0-android-sdk.zip
+            sep: ON
+            build_dir: build-arm64-v8a-ocv414-sep
+            artifact: MNN-android-api35-arm64-v8a-ocv414-sep
+          - opencv_version: "4.14.0"
+            opencv_zip: opencv-4.14.0-android-sdk.zip
+            opencv_url: https://github.com/opencv/opencv/releases/download/4.14.0/opencv-4.14.0-android-sdk.zip
+            sep: OFF
+            build_dir: build-arm64-v8a-ocv414
+            artifact: MNN-android-api35-arm64-v8a-ocv414
+          - opencv_version: "5.1.0"
+            opencv_zip: opencv-5.1.0-android-sdk.zip
+            opencv_url: https://github.com/opencv/opencv/releases/download/5.1.0/opencv-5.1.0-android-sdk.zip
+            sep: ON
+            build_dir: build-arm64-v8a-ocv510-sep
+            artifact: MNN-android-api35-arm64-v8a-ocv510-sep
+          - opencv_version: "5.1.0"
+            opencv_zip: opencv-5.1.0-android-sdk.zip
+            opencv_url: https://github.com/opencv/opencv/releases/download/5.1.0/opencv-5.1.0-android-sdk.zip
+            sep: OFF
+            build_dir: build-arm64-v8a-ocv510
+            artifact: MNN-android-api35-arm64-v8a-ocv510
+
+    steps:
+      - name: Clone latest MNN master
+        run: |
+          git clone --depth 1 https://github.com/alibaba/MNN.git MNN
+          echo "MNN_COMMIT=$(git -C MNN rev-parse --short HEAD)" >> $GITHUB_ENV
+      - name: Patch known upstream regression (best effort)
+        run: |
+          sed -i '/supportFp16FML/d' MNN/source/backend/arm82/Arm82Functions.cpp 2>/dev/null || true
+      - name: Install dependencies (downgrade CMake to 3.22.1)
+        run: |
+          sudo apt-get update
+          sudo apt-get remove -y cmake
+          wget -q https://github.com/Kitware/CMake/releases/download/v3.22.1/cmake-3.22.1-linux-x86_64.tar.gz
+          tar -xzf cmake-3.22.1-linux-x86_64.tar.gz
+          sudo cp -r cmake-3.22.1-linux-x86_64/bin/* /usr/local/bin/
+          sudo cp -r cmake-3.22.1-linux-x86_64/share/* /usr/local/share/
+          sudo apt-get install -y ninja-build make opencl-headers xz-utils wget unzip
+      - name: Download Android NDK r30 beta2
+        run: |
+          wget -q https://googledownloads.cn/android/repository/android-ndk-r30-beta2-linux.zip
+          unzip -q android-ndk-r30-beta2-linux.zip
+          echo "ANDROID_NDK=$PWD/android-ndk-r30-beta2" >> $GITHUB_ENV
+      - name: Cache OpenCV SDK
+        id: cache-opencv
+        uses: actions/cache@v4
+        with:
+          path: ${{ matrix.opencv_zip }}
+          key: opencv-android-${{ matrix.opencv_version }}
+
+      - name: Download OpenCV ${{ matrix.opencv_version }}
+        if: steps.cache-opencv.outputs.cache-hit != 'true'
+        run: |
+          wget -q ${{ matrix.opencv_url }}
+      - name: Setup OpenCV ${{ matrix.opencv_version }}
+        run: |
+          unzip -q ${{ matrix.opencv_zip }}
+          OpenCV_DIR=$(find . -maxdepth 5 -type d -path "*/sdk/native/jni" | head -n 1)
+          echo "OpenCV_DIR=$OpenCV_DIR" >> $GITHUB_ENV
+      - name: Configure CMake for arm64-v8a (using Ninja)
+        run: |
+          mkdir -p ${{ matrix.build_dir }}
+          cd ${{ matrix.build_dir }}
+          cmake ../MNN \
+            -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_STL=c++_shared \
+            -DMNN_USE_LOGCAT=ON \
+            -DMNN_USE_SSE=OFF \
+            -DMNN_ARM82=ON \
+            -DMNN_OPENCL=ON \
+            -DMNN_VULKAN=ON \
+            -DMNN_JNI=ON \
+            -DMNN_SEP_BUILD=${{ matrix.sep }} \
+            -DMNN_BUILD_OPENCV=ON \
+            -DMNN_IMGCODECS=ON \
+            -DMNN_SUPPORT_BF16=ON \
+            -DANDROID_NATIVE_API_LEVEL=android-35 \
+            -DMNN_BUILD_FOR_ANDROID_COMMAND=ON \
+            -DNATIVE_LIBRARY_OUTPUT=./lib \
+            -DNATIVE_INCLUDE_OUTPUT=. \
+            -DCMAKE_INSTALL_PREFIX=$PWD/install
+      - name: Build MNN with Ninja
+        run: |
+          cd ${{ matrix.build_dir }}
+          ninja
+      - name: Package entire build directory (with headers and libc++_shared.so)
+        run: |
+          cp -r MNN/include ${{ matrix.build_dir }}/
+          LIBCXX=$(find $ANDROID_NDK -name "libc++_shared.so" | grep "aarch64-linux-android" | head -n 1)
+          if [ -n "$LIBCXX" ]; then
+            mkdir -p ${{ matrix.build_dir }}/lib
+            cp "$LIBCXX" ${{ matrix.build_dir }}/lib/
+          fi
+          tar -cf - ${{ matrix.build_dir }} | xz -9e -T2 > ${{ matrix.artifact }}.tar.xz
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.xz
+
+  create-release:
+    runs-on: ubuntu-latest
+    needs: build-android
+    if: ${{ needs.build-android.result == 'success' && github.event_name != 'pull_request' }}
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Create Release (rolling nightly tag)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DATE=$(date -u +%Y%m%d)
+          gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
+          gh release create nightly \
+            dist/*/*.tar.xz \
+            --title "MNN Android Nightly ${DATE}" \
+            --notes "MNN | API35 arm64-v8a | OpenCV 4.14.0 + 5.1.0 | SEP ON/OFF"
