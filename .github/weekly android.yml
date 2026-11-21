@@ -1,4 +1,4 @@
-name: Weekly Build MNN for Android API 35 (Ninja + OpenCV 4/5)
+name: Weekly Build MNN for Android API 36 (Ninja + OpenCV 4/5)
 
 on:
   schedule:
@@ -24,25 +24,25 @@ jobs:
             opencv_url: https://github.com/opencv/opencv/releases/download/4.14.0/opencv-4.14.0-android-sdk.zip
             sep: ON
             build_dir: build-arm64-v8a-ocv414-sep
-            artifact: MNN-android-api35-arm64-v8a-ocv414-sep
+            artifact: MNN-android-api36-arm64-v8a-ocv414-sep
           - opencv_version: "4.14.0"
             opencv_zip: opencv-4.14.0-android-sdk.zip
             opencv_url: https://github.com/opencv/opencv/releases/download/4.14.0/opencv-4.14.0-android-sdk.zip
             sep: OFF
             build_dir: build-arm64-v8a-ocv414
-            artifact: MNN-android-api35-arm64-v8a-ocv414
+            artifact: MNN-android-api36-arm64-v8a-ocv414
           - opencv_version: "5.1.0"
             opencv_zip: opencv-5.1.0-android-sdk.zip
             opencv_url: https://github.com/opencv/opencv/releases/download/5.1.0/opencv-5.1.0-android-sdk.zip
             sep: ON
             build_dir: build-arm64-v8a-ocv510-sep
-            artifact: MNN-android-api35-arm64-v8a-ocv510-sep
+            artifact: MNN-android-api36-arm64-v8a-ocv510-sep
           - opencv_version: "5.1.0"
             opencv_zip: opencv-5.1.0-android-sdk.zip
             opencv_url: https://github.com/opencv/opencv/releases/download/5.1.0/opencv-5.1.0-android-sdk.zip
             sep: OFF
             build_dir: build-arm64-v8a-ocv510
-            artifact: MNN-android-api35-arm64-v8a-ocv510
+            artifact: MNN-android-api36-arm64-v8a-ocv510
 
     steps:
       - name: Clone latest MNN master
@@ -61,11 +61,11 @@ jobs:
           sudo cp -r cmake-3.22.1-linux-x86_64/bin/* /usr/local/bin/
           sudo cp -r cmake-3.22.1-linux-x86_64/share/* /usr/local/share/
           sudo apt-get install -y ninja-build make opencl-headers xz-utils wget unzip
-      - name: Download Android NDK r30 beta2
+      - name: Download Android NDK r30
         run: |
-          wget -q https://googledownloads.cn/android/repository/android-ndk-r30-beta2-linux.zip
-          unzip -q android-ndk-r30-beta2-linux.zip
-          echo "ANDROID_NDK=$PWD/android-ndk-r30-beta2" >> $GITHUB_ENV
+          wget -q https://googledownloads.cn/android/repository/android-ndk-r30-linux.zip
+          unzip -q android-ndk-r30-linux.zip
+          echo "ANDROID_NDK=$PWD/android-ndk-r30" >> $GITHUB_ENV
       - name: Cache OpenCV SDK
         id: cache-opencv
         uses: actions/cache@v4
@@ -102,7 +102,7 @@ jobs:
             -DMNN_BUILD_OPENCV=ON \
             -DMNN_IMGCODECS=ON \
             -DMNN_SUPPORT_BF16=ON \
-            -DANDROID_NATIVE_API_LEVEL=android-35 \
+            -DANDROID_NATIVE_API_LEVEL=android-36 \
             -DMNN_BUILD_FOR_ANDROID_COMMAND=ON \
             -DNATIVE_LIBRARY_OUTPUT=./lib \
             -DNATIVE_INCLUDE_OUTPUT=. \
@@ -150,4 +150,4 @@ jobs:
           gh release create nightly \
             dist/*/*.tar.xz \
             --title "MNN Android Nightly ${DATE}" \
-            --notes "MNN | API35 arm64-v8a | OpenCV 4.14.0 + 5.1.0 | SEP ON/OFF"
+            --notes "MNN | API36 arm64-v8a | OpenCV 4.14.0 + 5.1.0 | SEP ON/OFF"
